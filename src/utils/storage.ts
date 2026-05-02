@@ -13,7 +13,8 @@ const BIO_KEY = "biometric_master_password";
 const BIO_MODE_KEY = "biometric_mode";
 const VAULT_UNRECOVERABLE_KEY = "vault_unrecoverable";
 
-const PBKDF2_ITERATIONS = 10000;
+const PBKDF2_ITERATIONS = 2000;
+const PREVIOUS_PBKDF2_ITERATIONS = 10000;
 const LEGACY_PBKDF2_ITERATIONS = 100000;
 const KEY_SIZE = 256 / 32;
 const EXPORT_VERSION = 2;
@@ -28,6 +29,31 @@ const VALID_CATEGORIES = new Set([
   "Other",
 ]);
 
+// ─── Import Mode & Backup Schema ────────────────────────────────
+export type ImportMode = "merge" | "replace" | "merge-dedup";
+
+interface BackupMetadata {
+  appVersion?: string;
+  platform?: "ios" | "android" | "web";
+  exportedAt: number;
+}
+
+interface BackupPayload {
+  version: number;
+  format: string; // "v2" for new format with metadata
+  exportedAt: number;
+  entryCount: number;
+  salt: string;
+  iterations: number;
+  data: string;
+  dataHash?: string; // SHA256 for integrity verification
+  metadata?: BackupMetadata;
+}
+
+const MAX_BACKUP_SIZE_MB = 50; // 50MB limit
+const MAX_BACKUP_ENTRIES = 50000; // 50k entries max
+let importInProgressLock = false;
+
 // ─── Key Derivation ────────────────────────────────────────────
 
 // PBKDF2 via CryptoJS is expensive on mobile JS engines. Cache derived keys
@@ -36,6 +62,70 @@ const derivedKeyCache = new Map<string, string>();
 const cacheKeyId = (password: string, salt: string, iterations: number) =>
   `${iterations}:${salt}:${password}`;
 const clearDerivedKeyCache = () => derivedKeyCache.clear();
+
+type VaultRuntimeCache = {
+  passwordHash: string;
+  entries: PasswordEntry[];
+};
+let vaultRuntimeCache: VaultRuntimeCache | null = null;
+let vaultWriteQueue: Promise<unknown> = Promise.resolve();
+
+const cloneEntries = (entries: PasswordEntry[]): PasswordEntry[] =>
+  entries.map((entry) => ({ ...entry }));
+
+const getCachedVaultEntries = (
+  masterPassword: string,
+): PasswordEntry[] | null => {
+  if (!vaultRuntimeCache) return null;
+  if (vaultRuntimeCache.passwordHash !== hashPassword(masterPassword))
+    return null;
+  return cloneEntries(vaultRuntimeCache.entries);
+};
+
+const setCachedVaultEntries = (
+  masterPassword: string,
+  entries: PasswordEntry[],
+): void => {
+  vaultRuntimeCache = {
+    passwordHash: hashPassword(masterPassword),
+    entries: cloneEntries(entries),
+  };
+};
+
+const clearVaultRuntimeCache = (): void => {
+  vaultRuntimeCache = null;
+};
+
+const nowMs = (): number => Date.now();
+const logPerf = (
+  label: string,
+  startedAt: number,
+  extra?: Record<string, unknown>,
+) => {
+  if (!__DEV__) return;
+  const elapsedMs = nowMs() - startedAt;
+  console.log(`[perf] ${label}`, { elapsedMs, ...(extra ?? {}) });
+};
+
+const enqueueVaultWrite = async <T>(fn: () => Promise<T>): Promise<T> => {
+  const run = vaultWriteQueue.then(fn, fn);
+  vaultWriteQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+};
+
+const persistVaultEntries = async (
+  entries: PasswordEntry[],
+  masterPassword: string,
+): Promise<void> => {
+  const json = JSON.stringify(entries);
+  const cipher = await encryptData(json, masterPassword);
+  await setVaultCiphertext(cipher);
+  await SecureStore.deleteItemAsync(VAULT_UNRECOVERABLE_KEY);
+  setCachedVaultEntries(masterPassword, entries);
+};
 
 /**
  * Derives a strong cryptographic key from a password and salt.
@@ -51,7 +141,7 @@ const deriveKey = async (
     if (!createSaltIfMissing) {
       throw new Error("Missing vault salt");
     }
-    console.warn("No salt found; generating new salt");
+
     salt = CryptoJS.lib.WordArray.random(128 / 8).toString();
     await SecureStore.setItemAsync(SALT_KEY, salt);
   }
@@ -116,7 +206,7 @@ export const hashPassword = (password: string): string =>
   CryptoJS.SHA256(password).toString();
 
 export const saveMasterPassword = async (password: string): Promise<void> => {
-  console.log("saveMasterPassword called");
+  // console.log("saveMasterPassword called");
   const hash = hashPassword(password);
   await SecureStore.setItemAsync(MASTER_HASH_KEY, hash);
 };
@@ -181,17 +271,18 @@ export const isMasterPasswordSet = async (): Promise<boolean> => {
 export const verifyMasterPassword = async (
   password: string,
 ): Promise<boolean> => {
-  console.log("verifyMasterPassword called");
+  // console.log("verifyMasterPassword called");
   const storedHash = await SecureStore.getItemAsync(MASTER_HASH_KEY);
   if (!storedHash) return false;
   return storedHash === hashPassword(password);
 };
 
-export const canUnlockVault = async (masterPassword: string): Promise<boolean> => {
-  console.log("canUnlockVault called");
+export const canUnlockVault = async (
+  masterPassword: string,
+): Promise<boolean> => {
+  // console.log("canUnlockVault called");
   const cipher = await getVaultCiphertext();
   if (!cipher) {
-    console.info("No vault data found; unlock is safe");
     return true;
   }
   try {
@@ -206,7 +297,6 @@ export const canUnlockVault = async (masterPassword: string): Promise<boolean> =
 export const resetCorruptedVaultData = async (
   masterPassword: string,
 ): Promise<void> => {
-  console.warn("resetCorruptedVaultData called");
   await deleteVaultCiphertext();
   await SecureStore.deleteItemAsync(SALT_KEY);
   await SecureStore.deleteItemAsync(VAULT_UNRECOVERABLE_KEY);
@@ -219,7 +309,7 @@ export const encryptData = async (
   data: string,
   masterPassword: string,
 ): Promise<string> => {
-  console.log("encryptData called", { dataLength: data.length });
+  // console.log("encryptData called", { dataLength: data.length });
   const key = await deriveKey(masterPassword, { createSaltIfMissing: true });
   return CryptoJS.AES.encrypt(data, key).toString();
 };
@@ -238,7 +328,6 @@ export const decryptData = async (
   cipher: string,
   masterPassword: string,
 ): Promise<string> => {
-  console.log("decryptData called", { cipherLength: cipher.length });
   try {
     const key = await deriveKey(masterPassword, {
       createSaltIfMissing: false,
@@ -247,9 +336,11 @@ export const decryptData = async (
     const bytes = CryptoJS.AES.decrypt(cipher, key);
     return bytes.toString(CryptoJS.enc.Utf8);
   } catch {
-    console.error("decryptData failed (invalid key/ciphertext)");
     // Wrong password / legacy ciphertext can throw UTF-8 decode errors.
     // Return empty so callers handle it as decryption failure.
+    if (__DEV__) {
+      console.log("decryptData primary strategy failed; trying fallbacks");
+    }
     return "";
   }
 };
@@ -282,6 +373,19 @@ const decryptDataWithFallback = async (
   if (primary) return { json: primary, strategy: "pbkdf2+salt" };
 
   try {
+    const previousSaltedKey = await deriveKey(masterPassword, {
+      createSaltIfMissing: false,
+      iterations: PREVIOUS_PBKDF2_ITERATIONS,
+    });
+    const previousSalted = tryDecryptWithKey(cipher, previousSaltedKey);
+    if (previousSalted) {
+      return { json: previousSalted, strategy: "pbkdf2+salt-previous" };
+    }
+  } catch {
+    // Salt missing; continue with older fallback strategies.
+  }
+
+  try {
     const legacySaltedKey = await deriveKey(masterPassword, {
       createSaltIfMissing: false,
       iterations: LEGACY_PBKDF2_ITERATIONS,
@@ -311,7 +415,8 @@ const decryptDataWithFallback = async (
       iterations: LEGACY_PBKDF2_ITERATIONS,
     }).toString(),
   );
-  if (legacyPbkdf2NoSalt) return { json: legacyPbkdf2NoSalt, strategy: "pbkdf2-no-salt" };
+  if (legacyPbkdf2NoSalt)
+    return { json: legacyPbkdf2NoSalt, strategy: "pbkdf2-no-salt" };
 
   return { json: "", strategy: "none" };
 };
@@ -329,39 +434,52 @@ export const loadVault = async (
   masterPassword: string,
   opts?: LoadVaultOptions,
 ): Promise<PasswordEntry[]> => {
+  const startedAt = nowMs();
   console.log("loadVault called", {
     returnEmptyOnInvalid: opts?.returnEmptyOnInvalid ?? true,
   });
   const { returnEmptyOnInvalid = true } = opts ?? {};
 
+  const cachedEntries = getCachedVaultEntries(masterPassword);
+  if (cachedEntries) {
+    logPerf("loadVault.cacheHit", startedAt, { entries: cachedEntries.length });
+    return cachedEntries;
+  }
+
   if (returnEmptyOnInvalid) {
-    const unrecoverable = await SecureStore.getItemAsync(VAULT_UNRECOVERABLE_KEY);
+    const unrecoverable = await SecureStore.getItemAsync(
+      VAULT_UNRECOVERABLE_KEY,
+    );
     if (unrecoverable === "1") {
-      console.warn("Skipping vault decrypt: marked unrecoverable");
       return [];
     }
   }
 
   const cipher = await getVaultCiphertext();
   if (!cipher) {
-    console.warn("No vault ciphertext found");
+    setCachedVaultEntries(masterPassword, []);
+    logPerf("loadVault.noCipher", startedAt, { entries: 0 });
     return [];
   }
 
   let json: string;
   let strategy = "none";
   try {
+    const decryptStartedAt = nowMs();
     const decrypted = await decryptDataWithFallback(cipher, masterPassword);
+    logPerf("loadVault.decrypt", decryptStartedAt, {
+      strategy: decrypted.strategy,
+    });
     json = decrypted.json;
     strategy = decrypted.strategy;
-    console.log("Vault decrypt strategy used", { strategy });
+    /* decrypt strategy logging removed */
   } catch {
     if (returnEmptyOnInvalid) return [];
     throw new Error("Invalid master password or decryption failed");
   }
 
   if (!json) {
-    console.warn("Vault decryption returned empty payload");
+    clearVaultRuntimeCache();
     await SecureStore.setItemAsync(VAULT_UNRECOVERABLE_KEY, "1");
     if (returnEmptyOnInvalid) return [];
     // If json is empty but cipher existed, it usually means the key was wrong
@@ -371,7 +489,7 @@ export const loadVault = async (
 
   try {
     const parsed = JSON.parse(json) as PasswordEntry[];
-    console.info("Vault JSON parsed", { entries: parsed.length });
+
     // Migrate once only when legacy fallback decrypted the payload.
     if (strategy !== "pbkdf2+salt") {
       const normalizedCipher = await encryptData(
@@ -379,12 +497,17 @@ export const loadVault = async (
         masterPassword,
       );
       await setVaultCiphertext(normalizedCipher);
-      console.info("Vault data re-encrypted using current scheme");
     }
     await SecureStore.deleteItemAsync(VAULT_UNRECOVERABLE_KEY);
+    setCachedVaultEntries(masterPassword, parsed);
+    logPerf("loadVault.total", startedAt, {
+      entries: parsed.length,
+      strategy,
+    });
     return parsed;
   } catch {
     console.error("Vault JSON parse failed");
+    clearVaultRuntimeCache();
     await SecureStore.setItemAsync(VAULT_UNRECOVERABLE_KEY, "1");
     if (returnEmptyOnInvalid) return [];
     throw new Error("Vault data is corrupted or has an invalid format.");
@@ -395,78 +518,101 @@ export const saveVault = async (
   entries: PasswordEntry[],
   masterPassword: string,
 ): Promise<void> => {
-  console.log("saveVault called", { entries: entries.length });
-  const json = JSON.stringify(entries);
-  const cipher = await encryptData(json, masterPassword);
-  await setVaultCiphertext(cipher);
-  await SecureStore.deleteItemAsync(VAULT_UNRECOVERABLE_KEY);
+  const startedAt = nowMs();
+  // console.log("saveVault called", { entries: entries.length });
+  await enqueueVaultWrite(async () => {
+    await persistVaultEntries(entries, masterPassword);
+  });
+  logPerf("saveVault.total", startedAt, { entries: entries.length });
 };
 
 export const addEntry = async (
   entry: PasswordEntry,
   masterPassword: string,
 ): Promise<void> => {
-  console.log("addEntry called", { id: entry.id, title: entry.title });
-  const entries = await loadVault(masterPassword);
-  entries.push(entry);
-  await saveVault(entries, masterPassword);
+  // console.log("addEntry called", { id: entry.id, title: entry.title });
+  await enqueueVaultWrite(async () => {
+    const entries =
+      getCachedVaultEntries(masterPassword) ??
+      (await loadVault(masterPassword, { returnEmptyOnInvalid: false }));
+    await persistVaultEntries([...entries, entry], masterPassword);
+  });
 };
 
 export const updateEntry = async (
   updated: PasswordEntry,
   masterPassword: string,
 ): Promise<void> => {
-  console.log("updateEntry called", { id: updated.id, title: updated.title });
-  const entries = await loadVault(masterPassword);
-  const index = entries.findIndex((e) => e.id === updated.id);
-  if (index !== -1) entries[index] = updated;
-  await saveVault(entries, masterPassword);
+  // console.log("updateEntry called", { id: updated.id, title: updated.title });
+  await enqueueVaultWrite(async () => {
+    const entries =
+      getCachedVaultEntries(masterPassword) ??
+      (await loadVault(masterPassword, { returnEmptyOnInvalid: false }));
+    const nextEntries = entries.map((entry) =>
+      entry.id === updated.id ? updated : entry,
+    );
+    await persistVaultEntries(nextEntries, masterPassword);
+  });
 };
 
 export const deleteEntry = async (
   id: string,
   masterPassword: string,
 ): Promise<void> => {
-  console.log("deleteEntry called", { id });
-  const entries = await loadVault(masterPassword);
-  const filtered = entries.filter((e) => e.id !== id);
-  await saveVault(filtered, masterPassword);
+  // console.log("deleteEntry called", { id });
+  await enqueueVaultWrite(async () => {
+    const entries =
+      getCachedVaultEntries(masterPassword) ??
+      (await loadVault(masterPassword, { returnEmptyOnInvalid: false }));
+    const filtered = entries.filter((entry) => entry.id !== id);
+    await persistVaultEntries(filtered, masterPassword);
+  });
 };
 
 // ─── Settings ──────────────────────────────────────────────────
 const SETTINGS_KEY = "app_settings";
+let settingsRuntimeCache: AppSettings | null = null;
 
 export interface AppSettings {
   biometricsEnabled: boolean;
   autoLockMinutes: number; // 1, 2, 5, 10, 0 = never
   clipboardTimeout: number; // seconds, 0 = never
+  securityMode: boolean; // strict clipboard + immediate background clear
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   biometricsEnabled: true,
   autoLockMinutes: 2,
   clipboardTimeout: 30,
+  securityMode: false,
 };
 
 export const loadSettings = async (): Promise<AppSettings> => {
-  console.log("loadSettings called");
+  if (settingsRuntimeCache) return { ...settingsRuntimeCache };
+  if (false) console.log("dev");
   try {
     const raw = await SecureStore.getItemAsync(SETTINGS_KEY);
-    if (!raw) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    const parsed = raw
+      ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+      : DEFAULT_SETTINGS;
+    settingsRuntimeCache = parsed;
+    return { ...parsed };
   } catch {
-    return DEFAULT_SETTINGS;
+    settingsRuntimeCache = DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS };
   }
 };
 
 export const saveSettings = async (settings: AppSettings): Promise<void> => {
-  console.log("saveSettings called", settings);
+  if (false) console.log("dev");
   await SecureStore.setItemAsync(SETTINGS_KEY, JSON.stringify(settings));
+  settingsRuntimeCache = { ...settings };
 };
 
 export const clearVault = async (): Promise<void> => {
   await deleteVaultCiphertext();
   await SecureStore.deleteItemAsync(BIO_KEY);
+  clearVaultRuntimeCache();
   clearDerivedKeyCache();
 };
 
@@ -489,16 +635,183 @@ export const toggleFavorite = async (
   masterPassword: string,
 ): Promise<void> => {
   try {
-    const entries = await loadVault(masterPassword);
-    const index = entries.findIndex((e) => e.id === id);
-    if (index === -1) {
-      throw new Error(`Entry with id "${id}" not found in vault`);
-    }
-    entries[index].isFavorite = !entries[index].isFavorite;
-    await saveVault(entries, masterPassword);
+    await enqueueVaultWrite(async () => {
+      const entries =
+        getCachedVaultEntries(masterPassword) ??
+        (await loadVault(masterPassword, { returnEmptyOnInvalid: false }));
+      const index = entries.findIndex((entry) => entry.id === id);
+      if (index === -1) {
+        throw new Error(`Entry with id "${id}" not found in vault`);
+      }
+      const nextEntries = entries.map((entry) =>
+        entry.id === id ? { ...entry, isFavorite: !entry.isFavorite } : entry,
+      );
+      await persistVaultEntries(nextEntries, masterPassword);
+    });
   } catch (error) {
     console.error("Toggle favorite error:", error);
     throw error;
+  }
+};
+
+// ─── Backup Validation & Utils ─────────────────────────────────
+
+/**
+ * Calculates SHA256 hash of data for integrity verification
+ */
+const calculateDataHash = (data: string): string => {
+  return CryptoJS.SHA256(data).toString();
+};
+
+/**
+ * Validates backup file structure and size
+ */
+export const validateBackupFile = (
+  json: string,
+): { valid: boolean; error?: string } => {
+  try {
+    // Check size before parsing (prevent OOM)
+    const sizeInMB = new TextEncoder().encode(json).length / (1024 * 1024);
+    if (sizeInMB > MAX_BACKUP_SIZE_MB) {
+      return {
+        valid: false,
+        error: `Backup file too large (${sizeInMB.toFixed(1)}MB > ${MAX_BACKUP_SIZE_MB}MB)`,
+      };
+    }
+
+    const payload = JSON.parse(json);
+
+    // Validate structure
+    if (!payload || typeof payload !== "object") {
+      return { valid: false, error: "Invalid backup structure" };
+    }
+
+    if (!payload.data || typeof payload.data !== "string") {
+      return { valid: false, error: "Backup missing encrypted data" };
+    }
+
+    if (typeof payload.salt !== "string" || !payload.salt) {
+      return { valid: false, error: "Backup missing encryption salt" };
+    }
+
+    // Validate version
+    if (payload.version !== 1 && payload.version !== 2) {
+      return {
+        valid: false,
+        error: `Unsupported backup version: ${payload.version}`,
+      };
+    }
+
+    // Validate entry count if present
+    if (
+      payload.entryCount !== undefined &&
+      payload.entryCount > MAX_BACKUP_ENTRIES
+    ) {
+      return {
+        valid: false,
+        error: `Backup contains too many entries (${payload.entryCount} > ${MAX_BACKUP_ENTRIES})`,
+      };
+    }
+
+    return { valid: true };
+  } catch (e) {
+    return { valid: false, error: `Invalid backup format: ${String(e)}` };
+  }
+};
+
+/**
+ * Extracts metadata from backup without decrypting
+ */
+export const getBackupMetadata = (
+  json: string,
+): {
+  valid: boolean;
+  metadata?: {
+    version: number;
+    entryCount: number;
+    exportedAt: number;
+    appVersion?: string;
+    platform?: string;
+  };
+  error?: string;
+} => {
+  try {
+    const payload = JSON.parse(json) as BackupPayload;
+    return {
+      valid: true,
+      metadata: {
+        version: payload.version,
+        entryCount: payload.entryCount || 0,
+        exportedAt: payload.exportedAt,
+        appVersion: payload.metadata?.appVersion,
+        platform: payload.metadata?.platform,
+      },
+    };
+  } catch (e) {
+    return { valid: false, error: String(e) };
+  }
+};
+
+/**
+ * Verifies backup integrity using stored hash
+ */
+export const verifyBackupIntegrity = async (
+  json: string,
+  masterPassword: string,
+): Promise<{ valid: boolean; error?: string }> => {
+  try {
+    const payload = JSON.parse(json) as BackupPayload;
+
+    // If no hash stored, skip verification (old backup format)
+    if (!payload.dataHash) {
+      if (__DEV__)
+        console.log("No data hash in backup, skipping integrity check");
+      return { valid: true };
+    }
+
+    // Verify hash matches
+    const calculatedHash = calculateDataHash(payload.data);
+    if (calculatedHash !== payload.dataHash) {
+      return {
+        valid: false,
+        error: "Backup integrity check failed (data corrupted?)",
+      };
+    }
+
+    return { valid: true };
+  } catch (e) {
+    return { valid: false, error: `Integrity check error: ${String(e)}` };
+  }
+};
+
+/**
+ * Creates a snapshot of current vault for rollback
+ */
+const createVaultSnapshot = async (
+  masterPassword: string,
+): Promise<string | null> => {
+  try {
+    const entries = await loadVault(masterPassword, {
+      returnEmptyOnInvalid: false,
+    });
+    return JSON.stringify(entries);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Restores vault from snapshot on import failure
+ */
+const restoreVaultFromSnapshot = async (
+  snapshot: string,
+  masterPassword: string,
+): Promise<void> => {
+  try {
+    const entries = JSON.parse(snapshot) as PasswordEntry[];
+    await saveVault(entries, masterPassword);
+  } catch (e) {
+    console.error("Rollback failed:", e);
   }
 };
 
@@ -511,7 +824,8 @@ export const exportVault = async (masterPassword: string): Promise<string> => {
       returnEmptyOnInvalid: false,
     });
     // Portable export: encrypt with a random per-export salt stored in the file.
-    const exportSalt = CryptoJS.lib.WordArray.random(EXPORT_SALT_BYTES).toString();
+    const exportSalt =
+      CryptoJS.lib.WordArray.random(EXPORT_SALT_BYTES).toString();
     const iterations = PBKDF2_ITERATIONS;
     const encrypted = encryptDataPortable(
       JSON.stringify(entries),
@@ -519,13 +833,25 @@ export const exportVault = async (masterPassword: string): Promise<string> => {
       exportSalt,
       iterations,
     );
-    const payload = {
+
+    // Calculate integrity hash
+    const dataHash = calculateDataHash(encrypted);
+
+    const payload: BackupPayload = {
       version: EXPORT_VERSION,
+      format: "v2",
       exportedAt: Date.now(),
       entryCount: entries.length,
       salt: exportSalt,
       iterations,
       data: encrypted,
+      dataHash,
+      metadata: {
+        exportedAt: Date.now(),
+        platform: __DEV__
+          ? "web"
+          : (require("react-native").Platform.OS as any),
+      },
     };
     return JSON.stringify(payload, null, 2);
   } catch (error) {
@@ -573,7 +899,8 @@ export const importVault = async (
       }
       const now = Date.now();
       const category =
-        typeof entry.category === "string" && VALID_CATEGORIES.has(entry.category)
+        typeof entry.category === "string" &&
+        VALID_CATEGORIES.has(entry.category)
           ? entry.category
           : "Other";
       return {
@@ -584,7 +911,8 @@ export const importVault = async (
         notes: typeof entry.notes === "string" ? entry.notes : "",
         createdAt: typeof entry.createdAt === "number" ? entry.createdAt : now,
         updatedAt: typeof entry.updatedAt === "number" ? entry.updatedAt : now,
-        isFavorite: typeof entry.isFavorite === "boolean" ? entry.isFavorite : false,
+        isFavorite:
+          typeof entry.isFavorite === "boolean" ? entry.isFavorite : false,
         category: category as PasswordEntry["category"],
       };
     };
@@ -623,6 +951,260 @@ export const importVault = async (
   }
 };
 
+/**
+ * Enhanced import with mode selection and validation
+ * Modes:
+ * - "merge": Add new entries, keep existing (default, safest)
+ * - "replace": Replace entire vault with backup contents
+ * - "merge-dedup": Merge but remove exact duplicates
+ */
+export const importVaultWithMode = async (
+  json: string,
+  masterPassword: string,
+  mode: ImportMode = "merge",
+): Promise<{
+  success: boolean;
+  count: number;
+  entries?: PasswordEntry[];
+  duplicateCount?: number;
+  error?: string;
+}> => {
+  // Prevent concurrent imports
+  if (importInProgressLock) {
+    return {
+      success: false,
+      count: 0,
+      error: "Import already in progress. Please wait.",
+    };
+  }
+
+  importInProgressLock = true;
+  let vaultSnapshot: string | null = null;
+
+  try {
+    // Step 1: Validate backup file before any operations
+    const validation = validateBackupFile(json);
+    if (!validation.valid) {
+      return { success: false, count: 0, error: validation.error };
+    }
+
+    // Step 2: Verify integrity if hash present
+    const integrity = await verifyBackupIntegrity(json, masterPassword);
+    if (!integrity.valid) {
+      return { success: false, count: 0, error: integrity.error };
+    }
+
+    // Step 3: Create snapshot for rollback
+    vaultSnapshot = await createVaultSnapshot(masterPassword);
+
+    // Step 4: Decode backup
+    const imported = await decodeBackup(json, masterPassword);
+
+    if (!Array.isArray(imported)) {
+      return { success: false, count: 0, error: "Invalid data format" };
+    }
+
+    const normalizeEntry = (entry: any): PasswordEntry | null => {
+      if (
+        !entry ||
+        typeof entry.title !== "string" ||
+        typeof entry.username !== "string" ||
+        typeof entry.password !== "string"
+      ) {
+        return null;
+      }
+      const now = Date.now();
+      const category =
+        typeof entry.category === "string" &&
+        VALID_CATEGORIES.has(entry.category)
+          ? entry.category
+          : "Other";
+      return {
+        id: typeof entry.id === "string" && entry.id ? entry.id : uuidv4(),
+        title: entry.title,
+        username: entry.username,
+        password: entry.password,
+        notes: typeof entry.notes === "string" ? entry.notes : "",
+        createdAt: typeof entry.createdAt === "number" ? entry.createdAt : now,
+        updatedAt: typeof entry.updatedAt === "number" ? entry.updatedAt : now,
+        isFavorite:
+          typeof entry.isFavorite === "boolean" ? entry.isFavorite : false,
+        category: category as PasswordEntry["category"],
+      };
+    };
+
+    const existing = await loadVault(masterPassword, {
+      returnEmptyOnInvalid: false,
+    });
+
+    console.log("importVaultWithMode - loaded existing", {
+      mode,
+      existingCount: existing.length,
+      importedCount: imported.length,
+    });
+
+    let result: PasswordEntry[];
+    let count = 0;
+    let duplicateCount = 0;
+
+    if (mode === "replace") {
+      console.log("importVaultWithMode - starting REPLACE mode");
+      // REPLACE: Use only imported entries
+      result = [];
+      const importedIds = new Set<string>();
+      for (const entry of imported) {
+        const normalized = normalizeEntry(entry);
+        if (!normalized) {
+          console.warn(
+            "importVaultWithMode - REPLACE: entry normalization failed",
+            entry,
+          );
+          continue;
+        }
+
+        // Assign new ID if duplicate within imported set
+        let candidate = { ...normalized };
+        while (importedIds.has(candidate.id)) {
+          candidate.id = uuidv4();
+          duplicateCount++;
+        }
+        result.push(candidate);
+        importedIds.add(candidate.id);
+        count++;
+      }
+      console.log("importVaultWithMode - REPLACE mode complete", {
+        resultCount: result.length,
+        importedCount: imported.length,
+        count,
+        duplicateCount,
+      });
+    } else if (mode === "merge-dedup") {
+      console.log("importVaultWithMode - starting MERGE-DEDUP mode");
+      // MERGE-DEDUP: Merge but deduplicate by title+username
+      result = [...existing];
+      const existingIds = new Set(existing.map((e) => e.id));
+      const dedupeKey = new Set(
+        existing.map((e) => `${e.title}|${e.username}`),
+      );
+
+      for (const entry of imported) {
+        const normalized = normalizeEntry(entry);
+        if (!normalized) {
+          console.warn(
+            "importVaultWithMode - MERGE-DEDUP: entry normalization failed",
+            entry,
+          );
+          continue;
+        }
+
+        const candidate = { ...normalized };
+        const key = `${candidate.title}|${candidate.username}`;
+
+        // Skip if exact duplicate
+        if (dedupeKey.has(key)) {
+          duplicateCount++;
+          continue;
+        }
+
+        // Assign new ID if exists
+        while (existingIds.has(candidate.id)) {
+          candidate.id = uuidv4();
+        }
+        result.push(candidate);
+        existingIds.add(candidate.id);
+        dedupeKey.add(key);
+        count++;
+      }
+      console.log("importVaultWithMode - MERGE-DEDUP mode complete", {
+        resultCount: result.length,
+        existingCount: existing.length,
+        importedCount: imported.length,
+        count,
+        duplicateCount,
+      });
+    } else {
+      console.log("importVaultWithMode - starting MERGE mode");
+      // MERGE: Default safe merge (allow duplicates with new IDs)
+      result = [...existing];
+      const existingIds = new Set(existing.map((e) => e.id));
+
+      for (const entry of imported) {
+        const normalized = normalizeEntry(entry);
+        if (!normalized) {
+          console.warn(
+            "importVaultWithMode - MERGE: entry normalization failed",
+            entry,
+          );
+          continue;
+        }
+
+        const candidate = { ...normalized };
+        while (existingIds.has(candidate.id)) {
+          candidate.id = uuidv4();
+        }
+        result.push(candidate);
+        existingIds.add(candidate.id);
+        count++;
+      }
+      console.log("importVaultWithMode - MERGE mode complete", {
+        resultCount: result.length,
+        existingCount: existing.length,
+        importedCount: imported.length,
+        count,
+      });
+    }
+
+    // Step 5: Save with validation
+    console.log("importVaultWithMode - saving vault", {
+      mode,
+      resultCount: result.length,
+      count,
+    });
+    await saveVault(result, masterPassword);
+    console.log("importVaultWithMode - vault saved successfully");
+
+    if (__DEV__) {
+      console.log("Import successful", {
+        mode,
+        count,
+        duplicateCount,
+        totalEntries: result.length,
+      });
+    }
+
+    return {
+      success: true,
+      count,
+      entries: result,
+      duplicateCount: duplicateCount > 0 ? duplicateCount : undefined,
+    };
+  } catch (err) {
+    console.error("Import with mode error:", err);
+    console.error("Import failed details:", {
+      mode,
+      errorMessage: err instanceof Error ? err.message : String(err),
+      errorStack: err instanceof Error ? err.stack : undefined,
+    });
+
+    // Attempt rollback if snapshot exists
+    if (vaultSnapshot) {
+      try {
+        await restoreVaultFromSnapshot(vaultSnapshot, masterPassword);
+      } catch (rollbackErr) {
+        console.error("Rollback also failed:", rollbackErr);
+      }
+    }
+
+    return {
+      success: false,
+      count: 0,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    importInProgressLock = false;
+  }
+};
+
 const decodeBackup = async (
   rawJson: string,
   masterPassword: string,
@@ -648,7 +1230,12 @@ const decodeBackup = async (
     if (!salt) {
       throw new Error("Backup missing salt");
     }
-    decrypted = decryptDataPortable((payload as any).data, masterPassword, salt, iterations);
+    decrypted = decryptDataPortable(
+      (payload as any).data,
+      masterPassword,
+      salt,
+      iterations,
+    );
   } else {
     // v1 backups were encrypted using the device's internal vault salt stored in SecureStore.
     // They are only restorable on the same install (or if that salt is present).
@@ -707,4 +1294,9 @@ export const restoreVault = async (
       error: err instanceof Error ? err.message : String(err),
     };
   }
+};
+
+export const clearRuntimeCaches = (): void => {
+  clearVaultRuntimeCache();
+  vaultWriteQueue = Promise.resolve();
 };

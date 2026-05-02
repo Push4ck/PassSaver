@@ -83,14 +83,39 @@ export default function AppNavigator() {
           headerShown: false,
           contentStyle: { backgroundColor: COLORS.background },
           animation: "fade",
+          animationDuration: 300,
         }}
       >
-        <Stack.Screen name="Splash" component={SplashScreen} />
-        <Stack.Screen name="Setup" component={SetupScreen} />
-        <Stack.Screen name="Lock" component={LockScreen} />
-        <Stack.Screen name="Home" component={HomeScreen} />
-        <Stack.Screen name="AddEdit" component={AddEditScreen} />
-        <Stack.Screen name="Settings" component={SettingsScreen} />
+        <Stack.Screen
+          name="Splash"
+          component={SplashScreen}
+          options={{ animationDuration: 400 }}
+        />
+        <Stack.Screen
+          name="Setup"
+          component={SetupScreen}
+          options={{ animation: "fade" }}
+        />
+        <Stack.Screen
+          name="Lock"
+          component={LockScreen}
+          options={{ animation: "fade" }}
+        />
+        <Stack.Screen
+          name="Home"
+          component={HomeScreen}
+          options={{ animation: "fade" }}
+        />
+        <Stack.Screen
+          name="AddEdit"
+          component={AddEditScreen}
+          options={{ animation: "slide_from_bottom" }}
+        />
+        <Stack.Screen
+          name="Settings"
+          component={SettingsScreen}
+          options={{ animation: "slide_from_right" }}
+        />
       </Stack.Navigator>
     </NavigationContainer>
   );

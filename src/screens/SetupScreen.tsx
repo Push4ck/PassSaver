@@ -9,13 +9,19 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Image,
 } from "react-native";
 import Icon from "../components/Icon";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { COLORS, FONTS, SPACING } from "../constants/theme";
+import { COLORS, FONTS, SPACING, SHADOWS } from "../constants/theme";
 import { RootStackParamList } from "../navigation/AppNavigator";
 import { saveMasterPassword } from "../utils/storage";
 import { ACTION_ICONS } from "../utils/icons";
+import {
+  AnimatedButton,
+  FadeIn,
+  ScaleIn,
+} from "../components/AnimatedComponents";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Setup">;
 
@@ -62,93 +68,111 @@ export default function SetupScreen({ navigation }: Props) {
       behavior={Platform.OS === "ios" ? "padding" : "height"}
       style={styles.container}
     >
-       <View style={styles.header}>
-         <Icon name={ACTION_ICONS.security} size={60} color={COLORS.accent} />
-         <Text style={styles.title}>Create Master Password</Text>
-         <Text style={styles.subtitle}>
-           This password encrypts your entire vault.{"\n"}
-           Never forget it — it cannot be recovered.
-         </Text>
-       </View>
-
-      <View style={styles.form}>
-        {/* Password Field */}
-        <View style={styles.inputWrapper}>
-          <TextInput
-            style={styles.input}
-            placeholder="Master Password"
-            placeholderTextColor={COLORS.textSecondary}
-            secureTextEntry={!showPass}
-            value={password}
-            onChangeText={setPassword}
-          />
-         <TouchableOpacity
-           onPress={() => setShowPass(!showPass)}
-           style={styles.eyeBtn}
-         >
-           <Icon name={
-             showPass ? ACTION_ICONS.visibilityOff : ACTION_ICONS.visibility
-           } size={20} color={COLORS.textSecondary} />
-         </TouchableOpacity>
-        </View>
-
-        {/* Strength Bar */}
-        {password.length > 0 && (
-          <View style={styles.strengthRow}>
-            {[1, 2, 3].map((i) => (
-              <View
-                key={i}
-                style={[
-                  styles.strengthBar,
-                  {
-                    backgroundColor:
-                      i <= strength ? strengthColor : COLORS.border,
-                  },
-                ]}
+      <FadeIn duration={500} delay={100}>
+        <ScaleIn duration={400} delay={150} initialScale={0.9}>
+          <View style={styles.header}>
+            <View style={styles.iconBox}>
+              <Image
+                source={require("../../assets/PassSaver_logo.jpeg")}
+                style={styles.logo}
+                resizeMode="contain"
               />
-            ))}
-            <Text style={[styles.strengthLabel, { color: strengthColor }]}>
-              {strengthLabel}
+            </View>
+            <Text style={styles.title}>Create Master Password</Text>
+            <Text style={styles.subtitle}>
+              This password encrypts your entire vault.{"\n"}
+              Never forget it — it cannot be recovered.
             </Text>
           </View>
-        )}
+        </ScaleIn>
+      </FadeIn>
 
-        {/* Confirm Field */}
-        <View style={styles.inputWrapper}>
-          <TextInput
-            style={styles.input}
-            placeholder="Confirm Password"
-            placeholderTextColor={COLORS.textSecondary}
-            secureTextEntry={!showPass}
-            value={confirm}
-            onChangeText={setConfirm}
-          />
+      <FadeIn duration={500} delay={250}>
+        <View style={styles.form}>
+          {/* Password Field */}
+          <View style={styles.inputWrapper}>
+            <TextInput
+              style={styles.input}
+              placeholder="Master Password"
+              placeholderTextColor={COLORS.textSecondary}
+              secureTextEntry={!showPass}
+              value={password}
+              onChangeText={setPassword}
+            />
+            <TouchableOpacity
+              onPress={() => setShowPass(!showPass)}
+              style={styles.eyeBtn}
+            >
+              <Icon
+                name={
+                  showPass
+                    ? ACTION_ICONS.visibilityOff
+                    : ACTION_ICONS.visibility
+                }
+                size={20}
+                color={COLORS.textSecondary}
+              />
+            </TouchableOpacity>
+          </View>
+
+          {/* Strength Bar */}
+          {password.length > 0 && (
+            <View style={styles.strengthRow}>
+              {[1, 2, 3].map((i) => (
+                <View
+                  key={i}
+                  style={[
+                    styles.strengthBar,
+                    {
+                      backgroundColor:
+                        i <= strength ? strengthColor : COLORS.border,
+                    },
+                  ]}
+                />
+              ))}
+              <Text style={[styles.strengthLabel, { color: strengthColor }]}>
+                {strengthLabel}
+              </Text>
+            </View>
+          )}
+
+          {/* Confirm Field */}
+          <View style={styles.inputWrapper}>
+            <TextInput
+              style={styles.input}
+              placeholder="Confirm Password"
+              placeholderTextColor={COLORS.textSecondary}
+              secureTextEntry={!showPass}
+              value={confirm}
+              onChangeText={setConfirm}
+            />
+          </View>
+
+          <AnimatedButton
+            style={[styles.btn, loading && styles.btnDisabled]}
+            onPress={handleSetup}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator
+                size="small"
+                color={COLORS.background}
+                style={{ marginRight: 8 }}
+              />
+            ) : (
+              <Icon
+                name={ACTION_ICONS.security}
+                size={20}
+                color={COLORS.background}
+                style={{ marginRight: 8 }}
+              />
+            )}
+            <Text style={styles.btnText}>
+              {loading ? "Setting up..." : "Create Vault"}
+            </Text>
+          </AnimatedButton>
         </View>
-
-         <TouchableOpacity
-           style={[styles.btn, loading && styles.btnDisabled]}
-           onPress={handleSetup}
-           disabled={loading}
-         >
-           {loading ? (
-             <ActivityIndicator
-               size="small"
-               color={COLORS.background}
-               style={{ marginRight: 8 }}
-             />
-           ) : (
-             <Icon
-               name={ACTION_ICONS.security}
-               size={20}
-               color={COLORS.background}
-               style={{ marginRight: 8 }}
-             />
-           )}
-           <Text style={styles.btnText}>
-             {loading ? "Setting up..." : "Create Vault"}
-           </Text>
-         </TouchableOpacity>
-      </View>
+      </FadeIn>
 
       <View style={styles.glowCircle} />
     </KeyboardAvoidingView>
@@ -164,45 +188,82 @@ const styles = StyleSheet.create({
   },
   header: {
     alignItems: "center",
-    marginBottom: SPACING.xl,
-    gap: SPACING.sm,
+    marginBottom: SPACING.xl + SPACING.md,
+    gap: SPACING.lg,
   },
-  emoji: { fontSize: 52 },
+  iconBox: {
+    width: 90,
+    height: 90,
+    borderRadius: 24,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    alignItems: "center",
+    justifyContent: "center",
+    ...SHADOWS.md,
+  },
+  logo: {
+    width: 80,
+    height: 80,
+    borderRadius: 22,
+  },
   title: {
     fontSize: FONTS.sizes.xl,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textPrimary,
     textAlign: "center",
+    letterSpacing: -0.3,
   },
   subtitle: {
-    fontSize: FONTS.sizes.sm,
+    fontSize: FONTS.sizes.md,
     color: COLORS.textSecondary,
     textAlign: "center",
-    lineHeight: 20,
+    lineHeight: 24,
   },
-  form: { gap: SPACING.md },
+  form: {
+    gap: SPACING.lg,
+  },
   inputWrapper: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: COLORS.card,
     borderRadius: 14,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: COLORS.border,
     paddingHorizontal: SPACING.md,
+    ...SHADOWS.sm,
   },
   input: {
     flex: 1,
-    height: 52,
+    height: 56,
     color: COLORS.textPrimary,
     fontSize: FONTS.sizes.md,
   },
-  eyeBtn: { padding: SPACING.xs },
-  eyeIcon: { fontSize: 18 },
+  eyeBtn: {
+    padding: SPACING.xs,
+  },
+  btn: {
+    backgroundColor: COLORS.accent,
+    borderRadius: 14,
+    height: 56,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    marginTop: SPACING.lg,
+    ...SHADOWS.glow,
+  },
+  btnDisabled: { opacity: 0.6 },
+  btnText: {
+    color: COLORS.background,
+    fontSize: FONTS.sizes.lg,
+    fontWeight: FONTS.weights.bold,
+    letterSpacing: 0.3,
+  },
   strengthRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: SPACING.xs,
-    marginTop: -SPACING.xs,
+    marginTop: SPACING.xs,
   },
   strengthBar: {
     flex: 1,
@@ -212,23 +273,8 @@ const styles = StyleSheet.create({
   strengthLabel: {
     fontSize: FONTS.sizes.xs,
     fontWeight: FONTS.weights.bold,
-    width: 48,
+    width: 52,
     textAlign: "right",
-  },
-  btn: {
-    backgroundColor: COLORS.accent,
-    borderRadius: 14,
-    height: 54,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    marginTop: SPACING.sm,
-  },
-  btnDisabled: { opacity: 0.6 },
-  btnText: {
-    color: COLORS.background,
-    fontSize: FONTS.sizes.lg,
-    fontWeight: FONTS.weights.bold,
   },
   glowCircle: {
     position: "absolute",
@@ -236,7 +282,8 @@ const styles = StyleSheet.create({
     height: 250,
     borderRadius: 125,
     backgroundColor: COLORS.accentGlow,
-    top: -60,
-    left: -60,
+    bottom: -60,
+    right: -60,
+    zIndex: -1,
   },
 });

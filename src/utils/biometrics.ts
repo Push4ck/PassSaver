@@ -11,43 +11,66 @@ export type BiometricStatus = {
 };
 
 export async function getBiometricStatus(): Promise<BiometricStatus> {
-  const safe = async <T,>(fn: () => Promise<T>, fallback: T): Promise<T> => {
+  const safe = async <T>(fn: () => Promise<T>, fallback: T): Promise<T> => {
     try {
       return await fn();
-    } catch {
+    } catch (e) {
+      if (__DEV__) console.warn("Biometric check failed:", e);
       return fallback;
     }
   };
 
+  // Check hardware support first
   const compatible = await safe(
     () => LocalAuthentication.hasHardwareAsync(),
     false,
   );
-  const canAuthenticate = await safe(
-    () => LocalAuthentication.canAuthenticateAsync(),
+
+  // If no hardware, can't authenticate
+  if (!compatible) {
+    return {
+      compatible: false,
+      canAuthenticate: false,
+      enrolled: false,
+      enrolledLevel: null,
+      supportedTypes: [],
+      hasFaceSupport: false,
+      canUseBiometrics: false,
+    };
+  }
+
+  // Hardware exists, check if biometrics can be used
+  // Note: canAuthenticateAsync may not be available in all versions,
+  // so we derive it from enrolled state below
+  let canAuthenticate = false;
+
+  // Query enrolled state and supported types (these can be unreliable on Android)
+  const enrolled = await safe(
+    () => LocalAuthentication.isEnrolledAsync(),
     false,
-  );
-  const enrolled = await safe(() => LocalAuthentication.isEnrolledAsync(), false);
-  const supportedTypes = await safe(
-    () => LocalAuthentication.supportedAuthenticationTypesAsync(),
-    [],
   );
   const enrolledLevel = await safe(
     () => LocalAuthentication.getEnrolledLevelAsync(),
     null,
   );
+  const supportedTypes = await safe(
+    () => LocalAuthentication.supportedAuthenticationTypesAsync(),
+    [],
+  );
 
-  const hasFaceSupport =
-    supportedTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION) ||
-    // Some Android devices / OS versions incorrectly report empty supportedTypes even
-    // when biometrics are present; we treat "enrolled" as enough to let the OS choose.
-    false;
+  const hasFaceSupport = supportedTypes.includes(
+    LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION,
+  );
 
-  const canUseBiometrics =
-    canAuthenticate ||
+  // Derive canAuthenticate from enrolled/enrolledLevel
+  canAuthenticate =
     enrolled ||
     (enrolledLevel !== null &&
       enrolledLevel >= LocalAuthentication.SecurityLevel.BIOMETRIC_WEAK);
+
+  // Android quirk: Some devices report hardware available but empty supportedTypes
+  // In that case, trust canAuthenticate or enrolledLevel as indicators
+  const canUseBiometrics = canAuthenticate;
 
   return {
     compatible,
@@ -59,4 +82,3 @@ export async function getBiometricStatus(): Promise<BiometricStatus> {
     canUseBiometrics,
   };
 }
-

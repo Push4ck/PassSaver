@@ -8,30 +8,31 @@ import {
   TextInput,
   RefreshControl,
   Alert,
-  AppState,
   ActivityIndicator,
   BackHandler,
+  Image,
 } from "react-native";
 import {
   useNavigation,
   useRoute,
   RouteProp,
+  useFocusEffect,
 } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import * as Clipboard from "expo-clipboard";
 import Icon from "../components/Icon";
-import { COLORS, FONTS, SPACING } from "../constants/theme";
+import { COLORS, FONTS, SPACING, SHADOWS } from "../constants/theme";
 import { RootStackParamList } from "../navigation/AppNavigator";
 import { useSession } from "../context/SessionContext";
-import {
-  loadVault,
-  deleteEntry,
-  toggleFavorite,
-  loadSettings,
-} from "../utils/storage";
+import { loadVault, deleteEntry, toggleFavorite } from "../utils/storage";
 import { PasswordEntry, Category } from "../types";
 import PasswordGeneratorModal from "../components/PasswordGeneratorModal";
 import { CATEGORY_ICONS, ACTION_ICONS } from "../utils/icons";
+import {
+  AnimatedListItem,
+  AnimatedButton,
+  FadeIn,
+  ScaleIn,
+} from "../components/AnimatedComponents";
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 type RouteP = RouteProp<RootStackParamList, "Home">;
@@ -39,7 +40,7 @@ type RouteP = RouteProp<RootStackParamList, "Home">;
 export default function HomeScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<RouteP>();
-  const { masterPassword } = useSession();
+  const { masterPassword, secureCopy } = useSession();
   const [entries, setEntries] = useState<PasswordEntry[]>([]);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -48,40 +49,69 @@ export default function HomeScreen() {
   const [showGenerator, setShowGenerator] = useState(false);
   const [favoriting, setFavoriting] = useState(new Set<string>());
   const [deleting, setDeleting] = useState(new Set<string>());
-  const clipboardTimerRef = React.useRef<NodeJS.Timeout | null>(null);
-  const [clipboardTimeout, setClipboardTimeout] = useState<number>(30);
+  const fetchInFlightRef = React.useRef<Promise<void> | null>(null);
 
-  const fetchVault = useCallback(async (opts?: { silent?: boolean }) => {
-    if (__DEV__) {
-      console.log("Home fetchVault called", {
-        hasMasterPassword: Boolean(masterPassword),
-      });
-    }
-    if (!masterPassword) {
-      if (__DEV__) {
-        console.warn("Skipping vault load: missing master password in session");
+  const fetchVault = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (fetchInFlightRef.current) {
+        if (!opts?.silent) setRefreshing(true);
+        try {
+          await fetchInFlightRef.current;
+        } finally {
+          if (!opts?.silent) setRefreshing(false);
+        }
+        return;
       }
-      setEntries([]);
-      setRefreshing(false);
-      setInitialLoading(false);
-      return;
-    }
-    if (!opts?.silent) setRefreshing(true);
-    try {
-      const data = await loadVault(masterPassword);
-      if (__DEV__) {
-        console.info("Vault loaded into Home screen", { count: data.length });
+
+      const run = (async () => {
+        if (__DEV__) {
+          console.log("Home fetchVault called", {
+            hasMasterPassword: Boolean(masterPassword),
+          });
+        }
+        if (!masterPassword) {
+          if (__DEV__) console.log("Skipping vault load: no session password");
+          setEntries([]);
+          setRefreshing(false);
+          setInitialLoading(false);
+          return;
+        }
+        if (!opts?.silent) setRefreshing(true);
+        try {
+          const data = await loadVault(masterPassword);
+          if (__DEV__) {
+            console.info("Vault loaded into Home screen", {
+              count: data.length,
+            });
+          }
+          setEntries(data);
+        } finally {
+          if (!opts?.silent) setRefreshing(false);
+          setInitialLoading(false);
+        }
+      })();
+
+      fetchInFlightRef.current = run;
+      try {
+        await run;
+      } finally {
+        fetchInFlightRef.current = null;
       }
-      setEntries(data);
-    } finally {
-      if (!opts?.silent) setRefreshing(false);
-      setInitialLoading(false);
-    }
-  }, [masterPassword]);
+    },
+    [masterPassword],
+  );
 
   useEffect(() => {
     fetchVault({ silent: true });
   }, [fetchVault]);
+
+  // Reload vault data whenever screen is focused (e.g., after navigation back)
+  useFocusEffect(
+    useCallback(() => {
+      if (__DEV__) console.log("HomeScreen focused, reloading vault");
+      fetchVault({ silent: true });
+    }, [fetchVault]),
+  );
 
   useEffect(() => {
     const snapshot = route.params?.vaultSnapshot;
@@ -107,9 +137,6 @@ export default function HomeScreen() {
 
   useEffect(() => {
     if (__DEV__) console.info("HomeScreen mounted");
-    loadSettings()
-      .then((s) => setClipboardTimeout(Number(s.clipboardTimeout ?? 30)))
-      .catch(() => setClipboardTimeout(30));
 
     const backSub = BackHandler.addEventListener("hardwareBackPress", () => {
       if (navigation.canGoBack()) return false;
@@ -117,22 +144,8 @@ export default function HomeScreen() {
       return true;
     });
 
-    // Clear clipboard if app goes to background for security
-    const subscription = AppState.addEventListener("change", (nextAppState) => {
-      if (__DEV__) console.log("Home app state changed", { nextAppState });
-      if (nextAppState === "background" || nextAppState === "inactive") {
-        if (__DEV__)
-          console.log("Clearing clipboard due to app background/inactive");
-        Clipboard.setStringAsync("").catch(() => {});
-      }
-    });
-
     return () => {
-      if (clipboardTimerRef.current) {
-        clearTimeout(clipboardTimerRef.current);
-      }
       backSub.remove();
-      subscription.remove();
     };
   }, [navigation]);
 
@@ -155,95 +168,91 @@ export default function HomeScreen() {
     return [...list].sort((a, b) => {
       if (a.isFavorite && !b.isFavorite) return -1;
       if (!a.isFavorite && b.isFavorite) return 1;
-      return b.updatedAt - a.updatedAt;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
     });
   }, [entries, debouncedSearch]);
 
-  const handleCopy = useCallback(async (password: string) => {
-    try {
-      console.log("Copy password requested");
-      await Clipboard.setStringAsync(password);
-      if (clipboardTimeout === 0) {
-        console.info("Clipboard timeout disabled");
-        Alert.alert("Copied!", "Password copied to clipboard.");
-        return;
+  const handleCopy = useCallback(
+    async (password: string) => {
+      try {
+        await secureCopy(password);
+      } catch (error) {
+        if (__DEV__) {
+          console.error("Copy error:", error);
+        }
+        Alert.alert("Error", "Failed to copy password");
       }
+    },
+    [secureCopy],
+  );
 
+  const handleDelete = useCallback(
+    (id: string, title: string) => {
+      console.log("Delete entry requested", { id, title });
       Alert.alert(
-        "Copied!",
-        `Password copied. Clipboard will be cleared in ${clipboardTimeout} seconds.`,
+        "Delete Entry",
+        `Are you sure you want to delete "${title}"?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: async () => {
+              setDeleting((prev) => new Set([...prev, id]));
+              // Optimistically remove item for immediate UI feedback.
+              setEntries((prev) => prev.filter((e) => e.id !== id));
+              console.log("Deleting entry", { id });
+              try {
+                await deleteEntry(id, masterPassword);
+              } finally {
+                setDeleting((prev) => {
+                  const next = new Set(prev);
+                  next.delete(id);
+                  return next;
+                });
+              }
+            },
+          },
+        ],
       );
+    },
+    [masterPassword],
+  );
 
-      // Clear clipboard after timeout
-      if (clipboardTimerRef.current) {
-        clearTimeout(clipboardTimerRef.current);
-      }
+  const handleFavorite = useCallback(
+    async (id: string) => {
+      if (favoriting.has(id)) return; // Prevent spam
 
-      clipboardTimerRef.current = setTimeout(() => {
-        console.log("Clipboard timeout reached, clearing clipboard");
-        Clipboard.setStringAsync("").catch((error) => {
-          console.error("Error clearing clipboard:", error);
-        });
-      }, clipboardTimeout * 1000);
-    } catch (error) {
-      console.error("Copy error:", error);
-      Alert.alert("Error", "Failed to copy password");
-    }
-  }, [clipboardTimeout]);
-
-  const handleDelete = useCallback((id: string, title: string) => {
-    console.log("Delete entry requested", { id, title });
-    Alert.alert("Delete Entry", `Are you sure you want to delete "${title}"?`, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          setDeleting((prev) => new Set([...prev, id]));
-          // Optimistically remove item for immediate UI feedback.
-          setEntries((prev) => prev.filter((e) => e.id !== id));
-          console.log("Deleting entry", { id });
-          try {
-            await deleteEntry(id, masterPassword);
-          } finally {
-            setDeleting((prev) => {
-              const next = new Set(prev);
-              next.delete(id);
-              return next;
-            });
-          }
-        },
-      },
-    ]);
-  }, [masterPassword]);
-
-  const handleFavorite = useCallback(async (id: string) => {
-    if (favoriting.has(id)) return; // Prevent spam
-
-    console.log("Toggle favorite requested", { id });
-    setFavoriting((prev) => new Set([...prev, id]));
-    setEntries((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, isFavorite: !e.isFavorite } : e)),
-    );
-    try {
-      await toggleFavorite(id, masterPassword);
-    } catch (error: any) {
-      // Rollback optimistic favorite toggle on failure.
+      console.log("Toggle favorite requested", { id });
+      setFavoriting((prev) => new Set([...prev, id]));
       setEntries((prev) =>
-        prev.map((e) => (e.id === id ? { ...e, isFavorite: !e.isFavorite } : e)),
+        prev.map((e) =>
+          e.id === id ? { ...e, isFavorite: !e.isFavorite } : e,
+        ),
       );
-      Alert.alert(
-        "Toggle Failed",
-        error.message || "Unable to update favorite status",
-      );
-    } finally {
-      setFavoriting((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    }
-  }, [favoriting, masterPassword]);
+      try {
+        await toggleFavorite(id, masterPassword);
+      } catch (error: any) {
+        // Rollback optimistic favorite toggle on failure.
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === id ? { ...e, isFavorite: !e.isFavorite } : e,
+          ),
+        );
+        Alert.alert(
+          "Toggle Failed",
+          error.message || "Unable to update favorite status",
+        );
+      } finally {
+        setFavoriting((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    },
+    [favoriting, masterPassword],
+  );
 
   const onPressItem = useCallback(
     (item: PasswordEntry) => navigation.navigate("AddEdit", { entry: item }),
@@ -251,40 +260,61 @@ export default function HomeScreen() {
   );
 
   const renderItem = useCallback(
-    ({ item }: { item: PasswordEntry }) => (
-      <VaultRow
-        item={item}
-        isFavoriting={favoriting.has(item.id)}
-        isDeleting={deleting.has(item.id)}
-        onPress={onPressItem}
-        onFavorite={handleFavorite}
-        onCopy={handleCopy}
-        onDelete={handleDelete}
-      />
+    ({ item, index }: { item: PasswordEntry; index: number }) => (
+      <AnimatedListItem index={index}>
+        <VaultRow
+          item={item}
+          isFavoriting={favoriting.has(item.id)}
+          isDeleting={deleting.has(item.id)}
+          onPress={onPressItem}
+          onFavorite={handleFavorite}
+          onCopy={handleCopy}
+          onDelete={handleDelete}
+        />
+      </AnimatedListItem>
     ),
-    [favoriting, deleting, onPressItem, handleFavorite, handleCopy, handleDelete],
+    [
+      favoriting,
+      deleting,
+      onPressItem,
+      handleFavorite,
+      handleCopy,
+      handleDelete,
+    ],
   );
 
   return (
     <View style={styles.container}>
       {initialLoading && (
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color={COLORS.accent} />
-          <Text style={styles.loadingText}>Loading your vault…</Text>
-        </View>
+        <ScaleIn initialScale={0.9}>
+          <View style={styles.loadingOverlay}>
+            <View style={styles.spinnerBox}>
+              <ActivityIndicator size="large" color={COLORS.accent} />
+            </View>
+            <Text style={styles.loadingText}>Loading your vault…</Text>
+            <Text style={styles.loadingSubtext}>Securing your passwords</Text>
+          </View>
+        </ScaleIn>
       )}
       {/* Header */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>
-            Pass<Text style={{ color: COLORS.accent }}>Saver</Text>
-          </Text>
-          <Text style={styles.headerSub}>
-            {entries.length} passwords stored
-          </Text>
+        <View style={styles.headerLeft}>
+          <Image
+            source={require("../../assets/PassSaver_logo.jpeg")}
+            style={styles.headerLogo}
+            resizeMode="contain"
+          />
+          <View>
+            <Text style={styles.headerTitle}>
+              Pass<Text style={styles.spanColor}>Saver</Text>
+            </Text>
+            <Text style={styles.headerSub}>
+              {entries.length} passwords stored
+            </Text>
+          </View>
         </View>
         <View style={styles.headerActions}>
-          <TouchableOpacity
+          <AnimatedButton
             style={styles.settingsBtn}
             onPress={() => navigation.navigate("Settings")}
           >
@@ -293,13 +323,14 @@ export default function HomeScreen() {
               size={24}
               color={COLORS.textSecondary}
             />
-          </TouchableOpacity>
-          <TouchableOpacity
+          </AnimatedButton>
+          <AnimatedButton
             style={styles.addBtn}
             onPress={() => navigation.navigate("AddEdit", { entry: null })}
+            scaleValue={0.92}
           >
             <Text style={styles.addBtnText}>+</Text>
-          </TouchableOpacity>
+          </AnimatedButton>
         </View>
       </View>
 
@@ -343,17 +374,19 @@ export default function HomeScreen() {
           />
         }
         ListEmptyComponent={
-          <View style={styles.empty}>
-            <View style={styles.emptyIconBox}>
-              <Icon
-                name={ACTION_ICONS.security}
-                size={48}
-                color={COLORS.textSecondary}
-              />
+          <FadeIn delay={200} duration={400}>
+            <View style={styles.empty}>
+              <View style={styles.emptyIconBox}>
+                <Icon
+                  name={ACTION_ICONS.security}
+                  size={48}
+                  color={COLORS.textSecondary}
+                />
+              </View>
+              <Text style={styles.emptyText}>No passwords yet</Text>
+              <Text style={styles.emptySub}>Tap + to add your first entry</Text>
             </View>
-            <Text style={styles.emptyText}>No passwords yet</Text>
-            <Text style={styles.emptySub}>Tap + to add your first entry</Text>
-          </View>
+          </FadeIn>
         }
       />
     </View>
@@ -411,7 +444,7 @@ const VaultRow = React.memo(function VaultRow({
         </View>
       </View>
       <View style={styles.cardActions}>
-        <TouchableOpacity
+        <AnimatedButton
           style={[styles.actionBtn, isFavoriting && styles.actionBtnLoading]}
           onPress={() => onFavorite(item.id)}
           disabled={isFavoriting}
@@ -421,8 +454,8 @@ const VaultRow = React.memo(function VaultRow({
             size={20}
             color={COLORS.accent}
           />
-        </TouchableOpacity>
-        <TouchableOpacity
+        </AnimatedButton>
+        <AnimatedButton
           style={styles.actionBtn}
           onPress={() => onCopy(item.password)}
         >
@@ -431,8 +464,8 @@ const VaultRow = React.memo(function VaultRow({
             size={20}
             color={COLORS.textSecondary}
           />
-        </TouchableOpacity>
-        <TouchableOpacity
+        </AnimatedButton>
+        <AnimatedButton
           style={[styles.actionBtn, styles.deleteBtn]}
           onPress={() => onDelete(item.id, item.title)}
           disabled={isDeleting}
@@ -442,7 +475,7 @@ const VaultRow = React.memo(function VaultRow({
           ) : (
             <Icon name={ACTION_ICONS.delete} size={20} color={COLORS.danger} />
           )}
-        </TouchableOpacity>
+        </AnimatedButton>
       </View>
     </TouchableOpacity>
   );
@@ -459,9 +492,25 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     zIndex: 10,
-    gap: SPACING.sm,
+    gap: SPACING.md,
+  },
+  spinnerBox: {
+    width: 80,
+    height: 80,
+    borderRadius: 20,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: "center",
+    justifyContent: "center",
+    ...SHADOWS.md,
   },
   loadingText: {
+    color: COLORS.textPrimary,
+    fontSize: FONTS.sizes.lg,
+    fontWeight: FONTS.weights.bold,
+  },
+  loadingSubtext: {
     color: COLORS.textSecondary,
     fontSize: FONTS.sizes.sm,
   },
@@ -471,17 +520,31 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: SPACING.lg,
     paddingTop: SPACING.xxl + SPACING.md,
-    paddingBottom: SPACING.md,
+    paddingBottom: SPACING.lg,
+  },
+  headerLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: SPACING.md,
+  },
+  headerLogo: {
+    width: 50,
+    height: 50,
+    borderRadius: 12,
   },
   headerTitle: {
     fontSize: FONTS.sizes.xxl,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textPrimary,
+    letterSpacing: -0.5,
+  },
+  spanColor: {
+    color: COLORS.accent,
   },
   headerSub: {
     fontSize: FONTS.sizes.sm,
     color: COLORS.textSecondary,
-    marginTop: 2,
+    marginTop: SPACING.xs,
   },
   headerActions: {
     flexDirection: "row",
@@ -497,6 +560,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     alignItems: "center",
     justifyContent: "center",
+    ...SHADOWS.sm,
   },
   addBtn: {
     width: 46,
@@ -505,6 +569,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accent,
     alignItems: "center",
     justifyContent: "center",
+    ...SHADOWS.glow,
   },
   addBtnText: {
     fontSize: 24,
@@ -517,23 +582,24 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: COLORS.card,
     marginHorizontal: SPACING.lg,
-    marginBottom: SPACING.md,
+    marginBottom: SPACING.lg,
     borderRadius: 14,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: COLORS.border,
     paddingHorizontal: SPACING.md,
     gap: SPACING.sm,
+    ...SHADOWS.sm,
   },
   searchInput: {
     flex: 1,
-    height: 46,
+    height: 50,
     color: COLORS.textPrimary,
     fontSize: FONTS.sizes.md,
   },
   list: {
     paddingHorizontal: SPACING.lg,
     paddingBottom: SPACING.xxl,
-    gap: SPACING.sm,
+    gap: SPACING.md,
   },
   card: {
     flexDirection: "row",
@@ -542,8 +608,9 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: COLORS.border,
-    padding: SPACING.md,
+    padding: SPACING.lg,
     justifyContent: "space-between",
+    ...SHADOWS.md,
   },
   cardLeft: {
     flexDirection: "row",
@@ -558,6 +625,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accentSoft,
     alignItems: "center",
     justifyContent: "center",
+    ...SHADOWS.sm,
   },
   cardInfo: { flex: 1 },
   cardTitleRow: {
@@ -566,18 +634,18 @@ const styles = StyleSheet.create({
     gap: SPACING.xs,
   },
   cardTitle: {
-    fontSize: FONTS.sizes.md,
+    fontSize: FONTS.sizes.lg,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textPrimary,
   },
   cardUser: {
     fontSize: FONTS.sizes.sm,
     color: COLORS.textSecondary,
-    marginTop: 2,
+    marginTop: SPACING.xs,
   },
   cardActions: {
     flexDirection: "row",
-    gap: SPACING.xs,
+    gap: SPACING.sm,
   },
   actionBtn: {
     width: 36,
@@ -586,6 +654,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     alignItems: "center",
     justifyContent: "center",
+    ...SHADOWS.sm,
   },
   deleteBtn: {
     backgroundColor: "#ff4d6d22",
@@ -596,7 +665,7 @@ const styles = StyleSheet.create({
   empty: {
     alignItems: "center",
     paddingTop: SPACING.xxl * 2,
-    gap: SPACING.sm,
+    gap: SPACING.lg,
   },
   emptyIconBox: {
     width: 80,
@@ -608,14 +677,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginBottom: SPACING.sm,
+    ...SHADOWS.md,
   },
   emptyText: {
-    fontSize: FONTS.sizes.lg,
+    fontSize: FONTS.sizes.xl,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textPrimary,
   },
   emptySub: {
-    fontSize: FONTS.sizes.sm,
+    fontSize: FONTS.sizes.md,
     color: COLORS.textSecondary,
   },
 });

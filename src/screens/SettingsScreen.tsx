@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -17,11 +17,11 @@ import * as Sharing from "expo-sharing";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import Icon from "../components/Icon";
-import { exportVault, getBackupEntryCount, importVault } from "../utils/storage";
-import { useNavigation } from "@react-navigation/native";
+import { exportVault } from "../utils/storage";
+import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import * as LocalAuthentication from "expo-local-authentication";
-import { COLORS, FONTS, SPACING } from "../constants/theme";
+import { COLORS, FONTS, SPACING, SHADOWS } from "../constants/theme";
 import { RootStackParamList } from "../navigation/AppNavigator";
 import { useSession } from "../context/SessionContext";
 import {
@@ -37,8 +37,13 @@ import {
   getBiometricPassword,
   getBiometricPasswordNoAuth,
   setBiometricMode,
+  importVaultWithMode,
+  ImportMode,
+  getBackupMetadata,
+  validateBackupFile,
 } from "../utils/storage";
 import { ACTION_ICONS } from "../utils/icons";
+import { AnimatedButton, FadeIn } from "../components/AnimatedComponents";
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -59,7 +64,12 @@ const CLIPBOARD_OPTIONS = [
 
 export default function SettingsScreen() {
   const navigation = useNavigation<NavProp>();
-  const { masterPassword, setMasterPassword } = useSession();
+  const {
+    masterPassword,
+    setMasterPassword,
+    setSecurityMode,
+    setClipboardTimeout,
+  } = useSession();
 
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   // Expo's FileSystem typings vary by SDK/version; cast to avoid TS-only failures.
@@ -69,9 +79,9 @@ export default function SettingsScreen() {
   const [showChangePwd, setShowChangePwd] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportName, setExportName] = useState("");
-  const [safChoices, setSafChoices] = useState<Array<{ uri: string; name: string }>>(
-    [],
-  );
+  const [safChoices, setSafChoices] = useState<
+    Array<{ uri: string; name: string }>
+  >([]);
   const [oldPwd, setOldPwd] = useState("");
   const [newPwd, setNewPwd] = useState("");
   const [confPwd, setConfPwd] = useState("");
@@ -79,54 +89,164 @@ export default function SettingsScreen() {
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importMode, setImportMode] = useState<ImportMode>("merge");
+  const [showModeSelection, setShowModeSelection] = useState(false);
+  const [pendingBackupJson, setPendingBackupJson] = useState<string | null>(
+    null,
+  );
+  const [backupMetadata, setBackupMetadata] = useState<any>(null);
   const importInProgressRef = React.useRef(false);
   const exportInProgressRef = React.useRef(false);
+
   useEffect(() => {
     loadSettings().then(setSettings);
   }, []);
 
+  // Reload settings whenever screen is focused
+  useFocusEffect(
+    useCallback(() => {
+      loadSettings().then(setSettings);
+    }, []),
+  );
+
   const applyImportedJson = async (json: string) => {
-    let backupCount = 0;
     try {
-      backupCount = await getBackupEntryCount(json, masterPassword);
-    } catch (e) {
-      console.error("Backup preview failed:", e);
-    }
-
-    if (backupCount > 0) {
-      const proceed = await new Promise<boolean>((resolve) => {
+      // Step 1: Validate backup file
+      const validation = validateBackupFile(json);
+      if (!validation.valid) {
         Alert.alert(
-          "Confirm Import",
-          `Backup contains ${backupCount} entr${backupCount === 1 ? "y" : "ies"}. Import now?`,
-          [
-            { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
-            { text: "Import", onPress: () => resolve(true) },
-          ],
+          "Invalid Backup",
+          validation.error || "Backup file is corrupted.",
         );
-      });
-      if (!proceed) return;
-    }
+        return;
+      }
 
-    const { success, count, error, entries } = await importVault(json, masterPassword);
-    console.log("Import merge result", { success, count, error });
-    if (success) {
+      // Step 2: Extract metadata without decrypting
+      const metaResult = getBackupMetadata(json);
+      if (!metaResult.valid) {
+        Alert.alert("Invalid Backup", "Could not read backup metadata.");
+        return;
+      }
+
+      setBackupMetadata(metaResult.metadata);
+
+      // Step 3: Show metadata preview and mode selection
+      // Capture JSON in closure to avoid async state timing issues
       Alert.alert(
-        "Import Successful",
-        count === 0
-          ? "No new entries added. Existing entries were preserved."
-          : `${count} entries imported. Existing data was preserved.`,
+        "Backup Details",
+        `Version: ${metaResult.metadata?.version || "unknown"}\n` +
+          `Entries: ${metaResult.metadata?.entryCount || 0}\n` +
+          `Exported: ${metaResult.metadata?.exportedAt ? new Date(metaResult.metadata.exportedAt).toLocaleDateString() : "unknown"}\n\n` +
+          `Choose how to import this backup.`,
         [
           {
-            text: "OK",
-            onPress: () => navigation.navigate("Home", { vaultSnapshot: entries }),
+            text: "Merge (Keep All)",
+            onPress: () => executeImport("merge", json),
+          },
+          {
+            text: "Merge & Deduplicate",
+            onPress: () => executeImport("merge-dedup", json),
+          },
+          {
+            text: "Replace Entire Vault",
+            style: "destructive",
+            onPress: () => executeImport("replace", json),
+          },
+          {
+            text: "Cancel",
+            style: "cancel",
+            onPress: () => {
+              setPendingBackupJson(null);
+              setBackupMetadata(null);
+            },
           },
         ],
       );
-    } else {
+    } catch (e) {
+      console.error("applyImportedJson error:", e);
       Alert.alert(
-        "Import Failed",
-        error || "Invalid backup file or wrong master password.",
+        "Error",
+        "An unexpected error occurred while reading backup.",
       );
+    }
+  };
+
+  const executeImport = async (mode: ImportMode, backupJson: string) => {
+    console.log("executeImport - starting with mode:", mode);
+
+    if (!backupJson) {
+      console.error("executeImport - no backupJson provided");
+      setImporting(false);
+      return;
+    }
+
+    setImporting(true);
+
+    try {
+      console.log("executeImport - calling importVaultWithMode");
+      const { success, count, entries, error, duplicateCount } =
+        await importVaultWithMode(backupJson, masterPassword, mode);
+
+      console.log("executeImport - import result", {
+        success,
+        count,
+        mode,
+        duplicateCount,
+        error,
+      });
+
+      if (success) {
+        let message = `${count} entries imported`;
+        if (mode === "merge-dedup" && duplicateCount && duplicateCount > 0) {
+          message += ` (${duplicateCount} duplicates skipped)`;
+        }
+        if (mode === "replace") {
+          message = `Vault replaced with ${count} entries`;
+        }
+
+        Alert.alert("Import Successful", message, [
+          {
+            text: "OK",
+            onPress: () => {
+              setPendingBackupJson(null);
+              setBackupMetadata(null);
+              setImporting(false);
+              // Small delay to ensure state updates before navigation
+              setTimeout(() => {
+                navigation.navigate("Home", { vaultSnapshot: entries });
+              }, 150);
+            },
+          },
+        ]);
+      } else {
+        Alert.alert(
+          "Import Failed",
+          error ||
+            "Failed to import backup. Please check your master password.",
+          [
+            {
+              text: "OK",
+              onPress: () => {
+                setPendingBackupJson(null);
+                setBackupMetadata(null);
+                setImporting(false);
+              },
+            },
+          ],
+        );
+      }
+    } catch (e) {
+      console.error("executeImport - error:", e);
+      Alert.alert("Error", "An unexpected error occurred during import.", [
+        {
+          text: "OK",
+          onPress: () => {
+            setPendingBackupJson(null);
+            setBackupMetadata(null);
+            setImporting(false);
+          },
+        },
+      ]);
     }
   };
 
@@ -151,25 +271,42 @@ export default function SettingsScreen() {
           const msg = String(e?.message || e);
           // If SecureStore can't do biometric hardware auth, fallback to
           // LocalAuthentication gating (Face/PIN) + normal SecureStore storage.
-          if (msg.includes("No hardware available for biometric authentication")) {
-            console.warn("SecureStore biometric auth unavailable; using LocalAuth gate");
+          if (
+            msg.includes(
+              "No hardware available for biometric authentication",
+            ) ||
+            msg.includes("No hardware available")
+          ) {
+            if (__DEV__) console.log("Using LocalAuthentication gate fallback");
             const auth = await LocalAuthentication.authenticateAsync({
               promptMessage: "Enable biometric unlock",
               disableDeviceFallback: false,
             });
             if (!auth.success) {
+              if (__DEV__) console.log("User cancelled biometric setup");
               await updateSetting("biometricsEnabled", false);
               return;
             }
+            if (__DEV__)
+              console.log("Saving biometric with localAuthGate mode");
             await saveBiometricPasswordLocalAuthGate(masterPassword);
             await setBiometricMode("localAuthGate");
+          } else if (msg.includes("not enrolled")) {
+            Alert.alert(
+              "Biometric Not Set Up",
+              "No biometric data (Face ID, Touch ID, or fingerprint) is registered on your device. Please set up biometrics in device settings first.",
+            );
+            await updateSetting("biometricsEnabled", false);
+            return;
           } else {
+            if (__DEV__) console.warn("Unexpected biometric error:", msg);
             throw e;
           }
         }
 
         const confirmed =
-          (await getBiometricPassword()) ?? (await getBiometricPasswordNoAuth());
+          (await getBiometricPassword()) ??
+          (await getBiometricPasswordNoAuth());
 
         if (!confirmed) {
           await removeBiometricPassword();
@@ -208,6 +345,12 @@ export default function SettingsScreen() {
     const updated = { ...settings, [key]: value };
     setSettings(updated);
     await saveSettings(updated);
+
+    if (key === "securityMode" && setSecurityMode) {
+      setSecurityMode(value as boolean);
+    } else if (key === "clipboardTimeout" && setClipboardTimeout) {
+      setClipboardTimeout(value as number);
+    }
   };
 
   const handleChangePassword = async () => {
@@ -302,7 +445,8 @@ export default function SettingsScreen() {
         }
       } else if (
         Platform.OS === "android" &&
-        (FileSystem as any).StorageAccessFramework?.requestDirectoryPermissionsAsync
+        (FileSystem as any).StorageAccessFramework
+          ?.requestDirectoryPermissionsAsync
       ) {
         const SAF = (FileSystem as any).StorageAccessFramework;
         const perm = await SAF.requestDirectoryPermissionsAsync();
@@ -357,27 +501,31 @@ export default function SettingsScreen() {
 
   const handleImport = async () => {
     if (importing || importInProgressRef.current) return;
-    // Lock immediately to prevent double taps causing picker concurrency errors.
+
     importInProgressRef.current = true;
     setImporting(true);
-    if (!masterPassword) {
-      Alert.alert("Vault Locked", "Unlock your vault to import backups.");
-      setImporting(false);
-      importInProgressRef.current = false;
-      return;
-    }
+
     try {
+      if (!masterPassword) {
+        Alert.alert("Vault Locked", "Unlock your vault to import backups.");
+        return;
+      }
+
       console.log("Import requested");
       const result = await DocumentPicker.getDocumentAsync({
         type: ["application/json", "text/plain", "*/*"],
         copyToCacheDirectory: true,
         multiple: false,
       });
+
       if (result.canceled) {
         console.log("Import cancelled (picker)");
+
+        // Try SAF on Android if available
         if (
           Platform.OS === "android" &&
-          (FileSystem as any).StorageAccessFramework?.requestDirectoryPermissionsAsync
+          (FileSystem as any).StorageAccessFramework
+            ?.requestDirectoryPermissionsAsync
         ) {
           const SAF = (FileSystem as any).StorageAccessFramework;
           const perm = await SAF.requestDirectoryPermissionsAsync();
@@ -385,8 +533,12 @@ export default function SettingsScreen() {
             Alert.alert("Import Cancelled", "No backup file was selected.");
             return;
           }
-          const files: string[] = await SAF.readDirectoryAsync(perm.directoryUri);
-          const jsonUris = files.filter((u) => u.toLowerCase().includes(".json"));
+          const files: string[] = await SAF.readDirectoryAsync(
+            perm.directoryUri,
+          );
+          const jsonUris = files.filter((u) =>
+            u.toLowerCase().includes(".json"),
+          );
           if (jsonUris.length === 0) {
             Alert.alert(
               "No Backup Found",
@@ -395,8 +547,12 @@ export default function SettingsScreen() {
             return;
           }
           const sorted = [...jsonUris].sort((a, b) => {
-            const an = decodeURIComponent(a.split("/").pop() || a).toLowerCase();
-            const bn = decodeURIComponent(b.split("/").pop() || b).toLowerCase();
+            const an = decodeURIComponent(
+              a.split("/").pop() || a,
+            ).toLowerCase();
+            const bn = decodeURIComponent(
+              b.split("/").pop() || b,
+            ).toLowerCase();
             return an.localeCompare(bn);
           });
           setSafChoices(
@@ -407,13 +563,16 @@ export default function SettingsScreen() {
           );
           return;
         }
+
         Alert.alert("Import Cancelled", "No backup file was selected.");
         return;
       }
+
       if (!result.assets || result.assets.length === 0) {
         Alert.alert("Import Failed", "No file selected.");
         return;
       }
+
       const fileAsset = result.assets[0];
       const fileUri = fileAsset.uri;
       console.log("Import file selected", {
@@ -421,6 +580,7 @@ export default function SettingsScreen() {
         name: fileAsset.name,
         mimeType: fileAsset.mimeType,
       });
+
       const json = await FileSystem.readAsStringAsync(fileUri, {
         encoding: FS.EncodingType.UTF8,
       });
@@ -442,11 +602,17 @@ export default function SettingsScreen() {
       text: c.name,
       onPress: async () => {
         try {
-          console.log("Import SAF file selected", { chosenUri: c.uri, name: c.name });
+          console.log("Import SAF file selected", {
+            chosenUri: c.uri,
+            name: c.name,
+          });
           const json = await FileSystem.readAsStringAsync(c.uri, {
             encoding: FS.EncodingType.UTF8,
           });
-          console.log("Import SAF file read", { length: json.length, name: c.name });
+          console.log("Import SAF file read", {
+            length: json.length,
+            name: c.name,
+          });
           await applyImportedJson(json);
         } catch (e) {
           console.error("Import SAF read error:", e);
@@ -480,20 +646,22 @@ export default function SettingsScreen() {
     <View style={styles.container}>
       <ScrollView contentContainerStyle={styles.scroll}>
         {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            onPress={() => navigation.goBack()}
-            style={styles.backBtn}
-          >
-            <Icon
-              name={ACTION_ICONS.back}
-              size={24}
-              color={COLORS.textPrimary}
-            />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Settings</Text>
-          <View style={{ width: 40 }} />
-        </View>
+        <FadeIn duration={400} delay={50}>
+          <View style={styles.header}>
+            <AnimatedButton
+              onPress={() => navigation.goBack()}
+              style={styles.backBtn}
+            >
+              <Icon
+                name={ACTION_ICONS.back}
+                size={24}
+                color={COLORS.textPrimary}
+              />
+            </AnimatedButton>
+            <Text style={styles.headerTitle}>Settings</Text>
+            <View style={{ width: 40 }} />
+          </View>
+        </FadeIn>
 
         {/* Security Section */}
         <View style={styles.sectionLabelContainer}>
@@ -512,12 +680,40 @@ export default function SettingsScreen() {
               />
               <View>
                 <Text style={styles.rowTitle}>Biometric Unlock</Text>
-                <Text style={styles.rowSub}>Use your device authentication (PIN/Face)</Text>
+                <Text style={styles.rowSub}>
+                  Use your device authentication (PIN/Face)
+                </Text>
               </View>
             </View>
             <Switch
               value={settings.biometricsEnabled}
               onValueChange={handleToggleBiometrics}
+              trackColor={{ false: COLORS.border, true: COLORS.accent }}
+              thumbColor={COLORS.textPrimary}
+            />
+          </View>
+
+          <View style={styles.divider} />
+
+          {/* Security Mode Toggle */}
+          <View style={styles.row}>
+            <View style={styles.rowLeft}>
+              <Icon
+                name={ACTION_ICONS.security}
+                size={24}
+                color={COLORS.accent}
+                style={styles.rowIcon}
+              />
+              <View>
+                <Text style={styles.rowTitle}>Security Mode</Text>
+                <Text style={styles.rowSub}>
+                  Strict clipboard & immediate background clear
+                </Text>
+              </View>
+            </View>
+            <Switch
+              value={settings.securityMode}
+              onValueChange={(value) => updateSetting("securityMode", value)}
               trackColor={{ false: COLORS.border, true: COLORS.accent }}
               thumbColor={COLORS.textPrimary}
             />
@@ -907,6 +1103,8 @@ const styles = StyleSheet.create({
   },
   scroll: {
     padding: SPACING.lg,
+    paddingBottom: SPACING.xxl,
+    gap: SPACING.md,
   },
   sectionLabelContainer: {
     flexDirection: "row",
@@ -930,18 +1128,20 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     alignItems: "center",
     justifyContent: "center",
+    ...SHADOWS.sm,
   },
   headerTitle: {
     fontSize: FONTS.sizes.xl,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textPrimary,
+    letterSpacing: -0.3,
   },
   sectionLabel: {
-    fontSize: FONTS.sizes.sm,
+    fontSize: FONTS.sizes.xs,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textSecondary,
     textTransform: "uppercase",
-    letterSpacing: 0.8,
+    letterSpacing: 1,
     marginBottom: SPACING.sm,
     marginTop: SPACING.lg,
     marginLeft: SPACING.xs,
@@ -952,12 +1152,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     overflow: "hidden",
+    ...SHADOWS.md,
   },
   row: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    padding: SPACING.md,
+    padding: SPACING.lg,
   },
   rowLeft: {
     flexDirection: "row",
@@ -967,8 +1168,8 @@ const styles = StyleSheet.create({
   },
   rowIcon: { marginRight: SPACING.md },
   rowTitle: {
-    fontSize: FONTS.sizes.md,
-    fontWeight: FONTS.weights.medium,
+    fontSize: FONTS.sizes.lg,
+    fontWeight: FONTS.weights.bold,
     color: COLORS.textPrimary,
   },
   rowSub: {
@@ -996,12 +1197,14 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.sm,
     borderRadius: 20,
     backgroundColor: COLORS.surface,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: COLORS.border,
+    ...SHADOWS.sm,
   },
   optionChipActive: {
     backgroundColor: COLORS.accentSoft,
     borderColor: COLORS.accent,
+    borderWidth: 2,
   },
   optionText: {
     fontSize: FONTS.sizes.sm,
@@ -1033,9 +1236,10 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: SPACING.lg,
-    gap: SPACING.md,
+    gap: SPACING.lg,
     borderWidth: 1,
     borderColor: COLORS.border,
+    ...SHADOWS.lg,
   },
   modalTitle: {
     fontSize: FONTS.sizes.lg,
@@ -1084,11 +1288,12 @@ const styles = StyleSheet.create({
   },
   modalSave: {
     flex: 1,
-    height: 50,
+    height: 52,
     borderRadius: 12,
     backgroundColor: COLORS.accent,
     alignItems: "center",
     justifyContent: "center",
+    ...SHADOWS.glow,
   },
   modalSaveText: {
     color: COLORS.background,

@@ -11,14 +11,17 @@ export const initLogger = () => {
   if (initialized) return;
   initialized = true;
 
+  // Keep production runtime lean; verbose prefix wrapping is for debugging only.
+  if (true) return;
+
   const baseLog = console.log.bind(console) as ConsoleMethod;
   const baseWarn = console.warn.bind(console) as ConsoleMethod;
   const baseError = console.error.bind(console) as ConsoleMethod;
   const baseInfo = console.info.bind(console) as ConsoleMethod;
 
-  console.log = (...args: unknown[]) => baseLog(formatPrefix("LOG"), ...args);
-  console.info = (...args: unknown[]) => baseInfo(formatPrefix("INFO"), ...args);
-  console.warn = (...args: unknown[]) => baseWarn(formatPrefix("WARN"), ...args);
+  // stripped in production
+  // stripped in production
+  // stripped in production
   console.error = (...args: unknown[]) =>
     baseError(formatPrefix("ERROR"), ...args);
 
@@ -26,10 +29,12 @@ export const initLogger = () => {
   if (maybeErrorUtils?.getGlobalHandler && maybeErrorUtils?.setGlobalHandler) {
     const previous = maybeErrorUtils.getGlobalHandler();
     maybeErrorUtils.setGlobalHandler((error: Error, isFatal?: boolean) => {
-      console.error("Unhandled JS error", { isFatal, message: error?.message });
+      // stripped in production
       if (previous) previous(error, isFatal);
     });
   }
 
-  console.log("Logger initialized");
+  // stripped in production
 };
+
+

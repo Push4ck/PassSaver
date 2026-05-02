@@ -4,28 +4,28 @@
     "slug": "PassSaver",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "icon": "./assets/PassSaver_logo.jpeg",
+    "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/PassSaver_logo.jpeg",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0a1a14"
     },
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "foregroundImage": "./assets/PassSaver_logo.jpeg",
+        "backgroundColor": "#0a1a14"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.push4ck.PassSaver"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/PassSaver_logo.jpeg"
     },
     "plugins": [
       "expo-font"

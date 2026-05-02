@@ -1,12 +1,10 @@
 import React, { useEffect, useRef } from "react";
-import { View, Text, StyleSheet, Animated } from "react-native";
-import Icon from "../components/Icon";
+import { View, Text, StyleSheet, Animated, Image } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { COLORS, FONTS, SPACING } from "../constants/theme";
+import { COLORS, FONTS, SPACING, SHADOWS } from "../constants/theme";
 import { RootStackParamList } from "../navigation/AppNavigator";
 import { isMasterPasswordSet } from "../utils/storage";
-import { ACTION_ICONS } from "../utils/icons";
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -42,10 +40,14 @@ export default function SplashScreen() {
       <Animated.View
         style={[styles.content, { opacity, transform: [{ translateY }] }]}
       >
-         <View style={styles.iconBox}>
-           <Icon name={ACTION_ICONS.security} size={60} color={COLORS.accent} />
-         </View>
-        <Text style={styles.title}>PassSaver</Text>
+        {/* <View style={styles.iconBox}> */}
+          <Image
+            source={require("../../assets/PassSaver_logo.jpeg")}
+            style={styles.logo}
+            resizeMode="contain"
+          />
+        {/* </View> */}
+        {/* <Text style={styles.title}>PassSaver</Text> */}
         <Text style={styles.subtitle}>Your vault. Your control.</Text>
       </Animated.View>
       <View style={styles.glowCircle} />
@@ -71,18 +73,24 @@ const styles = StyleSheet.create({
   },
   content: {
     alignItems: "center",
-    gap: SPACING.md,
+    gap: SPACING.lg,
   },
   iconBox: {
-    width: 90,
-    height: 90,
-    borderRadius: 24,
+    width: 100,
+    height: 100,
+    borderRadius: 28,
     backgroundColor: COLORS.card,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: COLORS.accent,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: SPACING.sm,
+    marginBottom: SPACING.md,
+    ...SHADOWS.md,
+  },
+  logo: {
+    width: 150,
+    height: 150,
+    borderRadius: 32,
   },
   icon: {
     fontSize: 44,
@@ -91,11 +99,11 @@ const styles = StyleSheet.create({
     fontSize: FONTS.sizes.xxl,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textPrimary,
-    letterSpacing: 1.5,
+    letterSpacing: -0.5,
   },
   subtitle: {
-    fontSize: FONTS.sizes.md,
+    fontSize: FONTS.sizes.lg,
     color: COLORS.textSecondary,
-    letterSpacing: 1,
+    letterSpacing: 0.5,
   },
 });

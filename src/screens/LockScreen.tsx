@@ -10,11 +10,12 @@ import {
   Platform,
   AppState,
   ActivityIndicator,
+  Image,
 } from "react-native";
 import * as LocalAuthentication from "expo-local-authentication";
 import Icon from "../components/Icon";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { COLORS, FONTS, SPACING } from "../constants/theme";
+import { COLORS, FONTS, SPACING, SHADOWS } from "../constants/theme";
 import { RootStackParamList } from "../navigation/AppNavigator";
 import {
   verifyMasterPassword,
@@ -26,6 +27,7 @@ import {
 import { useSession } from "../context/SessionContext";
 import { ACTION_ICONS } from "../utils/icons";
 import { getBiometricStatus } from "../utils/biometrics";
+import { AnimatedButton, FadeIn } from "../components/AnimatedComponents";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Lock">;
 
@@ -37,20 +39,37 @@ export default function LockScreen({ navigation }: Props) {
   const [bioVerified, setBioVerified] = useState(false);
   const [bioEnabled, setBioEnabled] = useState(true);
   const [bioLoading, setBioLoading] = useState(false);
+  const [bioRetryCount, setBioRetryCount] = useState(0);
   const { setMasterPassword } = useSession();
   const passwordInputRef = React.useRef<TextInput>(null);
+  const isMountedRef = React.useRef(true);
 
   useEffect(() => {
     console.info("LockScreen mounted");
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     loadSettings()
-      .then((s) => setBioEnabled(Boolean(s.biometricsEnabled)))
-      .catch(() => setBioEnabled(true));
+      .then((s) => {
+        if (isMountedRef.current) {
+          setBioEnabled(Boolean(s.biometricsEnabled));
+        }
+      })
+      .catch(() => {
+        if (isMountedRef.current) {
+          setBioEnabled(true);
+        }
+      });
     checkBiometrics();
   }, []);
 
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") {
+      if (state === "active" && isMountedRef.current) {
         checkBiometrics();
       }
     });
@@ -58,54 +77,125 @@ export default function LockScreen({ navigation }: Props) {
   }, []);
 
   const checkBiometrics = async () => {
-    console.log("Checking biometric availability");
+    if (!isMountedRef.current) return;
+    if (__DEV__) console.log("Checking biometric availability");
+
     const status = await getBiometricStatus();
-    console.log("Biometric status", status);
-    setBioAvailable(status.canUseBiometrics);
+    if (__DEV__) console.log("Biometric status", status);
+
+    if (isMountedRef.current) {
+      setBioAvailable(status.canUseBiometrics);
+      setBioRetryCount(0);
+    }
   };
 
   const triggerBiometric = async () => {
-    console.log("Biometric unlock requested");
+    if (__DEV__)
+      console.log("Biometric unlock requested, attempt", bioRetryCount + 1);
     if (bioLoading) return;
+
     setBioLoading(true);
     try {
       const mode = await getBiometricMode();
+      if (__DEV__) console.log("Biometric mode:", mode);
 
       let storedPassword: string | null = null;
-      if (mode === "secureStoreAuth") {
-        // SecureStore will trigger the OS prompt (biometric hardware required).
-        storedPassword = await getBiometricPassword();
-      } else {
-        // LocalAuthentication gate: allow Face/PIN, then read normally.
-        const auth = await LocalAuthentication.authenticateAsync({
-          promptMessage: "Unlock PassSaver",
-          disableDeviceFallback: false,
-        });
-        if (!auth.success) return;
-        storedPassword = await getBiometricPasswordNoAuth();
+
+      try {
+        if (mode === "secureStoreAuth") {
+          // SecureStore with hardware auth
+          storedPassword = await getBiometricPassword();
+        } else {
+          // LocalAuthentication gate: allow Face/PIN, then read normally
+          const auth = await LocalAuthentication.authenticateAsync({
+            promptMessage: "Unlock PassSaver",
+            disableDeviceFallback: false,
+          });
+          if (!auth.success) {
+            if (__DEV__) console.log("User cancelled biometric prompt");
+            if (isMountedRef.current) setBioLoading(false);
+            return;
+          }
+          storedPassword = await getBiometricPasswordNoAuth();
+        }
+      } catch (authError: any) {
+        const errorMsg = String(authError?.message || authError);
+        if (__DEV__) console.warn("Biometric authentication error:", errorMsg);
+
+        // Check for device-specific failures that should disable biometric
+        if (
+          errorMsg.includes("No hardware available") ||
+          errorMsg.includes("not enrolled") ||
+          errorMsg.includes("not configured")
+        ) {
+          if (__DEV__)
+            console.log("Device biometric unavailable, disabling UI");
+          if (isMountedRef.current) {
+            setBioAvailable(false);
+            setBioLoading(false);
+          }
+          Alert.alert(
+            "Biometric Unavailable",
+            "Your device biometric is no longer available. Please use your master password.",
+          );
+          return;
+        }
+
+        // For transient errors, allow retry
+        if (bioRetryCount < 2) {
+          if (__DEV__) console.log("Transient error, allowing retry");
+          if (isMountedRef.current) {
+            setBioRetryCount(bioRetryCount + 1);
+            setBioLoading(false);
+          }
+          Alert.alert(
+            "Try Again",
+            "Biometric authentication failed. Please try again.",
+          );
+          return;
+        }
+
+        throw authError;
       }
 
       if (storedPassword) {
-        console.info("Biometric unlock succeeded with stored password");
+        if (__DEV__) console.info("Biometric unlock succeeded");
         setMasterPassword(storedPassword);
+        if (isMountedRef.current) {
+          setBioLoading(false);
+        }
         navigation.replace("Home");
       } else {
-        console.warn("Biometric verified but no stored password found");
-        setBioVerified(true);
-        passwordInputRef.current?.focus();
+        if (__DEV__) console.warn("Biometric verified but no stored password");
+        if (isMountedRef.current) {
+          setBioVerified(true);
+          setBioLoading(false);
+          passwordInputRef.current?.focus();
+        }
         Alert.alert(
           "Step Required",
           "Biometrics verified, but please enter password once to re-sync.",
         );
       }
     } catch (error) {
-      console.error("Biometric authentication error:", error);
+      if (__DEV__) console.error("Biometric authentication error:", error);
+      if (isMountedRef.current) {
+        setBioLoading(false);
+      }
       Alert.alert(
         "Authentication Failed",
-        "Please try again or use your master password.",
+        "Biometric authentication encountered an error. Please use your master password instead.",
+        [
+          {
+            text: "OK",
+            onPress: () => {
+              if (isMountedRef.current) {
+                passwordInputRef.current?.focus();
+              }
+            },
+          },
+        ],
       );
-    } finally {
-      setBioLoading(false);
     }
   };
 
@@ -133,77 +223,90 @@ export default function LockScreen({ navigation }: Props) {
       behavior={Platform.OS === "ios" ? "padding" : "height"}
       style={styles.container}
     >
-      <View style={styles.header}>
-        <View style={styles.iconBox}>
-          <Icon name={ACTION_ICONS.security} size={60} color={COLORS.accent} />
-        </View>
-        <Text style={styles.title}>PassSaver</Text>
-        <Text style={styles.subtitle}>
-          Enter your master password to unlock
-        </Text>
-      </View>
-
-      <View style={styles.form}>
-        <View style={styles.inputWrapper}>
-          <TextInput
-            ref={passwordInputRef}
-            style={styles.input}
-            placeholder="Master Password"
-            placeholderTextColor={COLORS.textSecondary}
-            secureTextEntry={!showPass}
-            value={password}
-            onChangeText={setPassword}
-            onSubmitEditing={handleUnlock}
-          />
-          <TouchableOpacity
-            onPress={() => setShowPass(!showPass)}
-            style={styles.eyeBtn}
-          >
-            <Icon
-              name={
-                showPass ? ACTION_ICONS.visibilityOff : ACTION_ICONS.visibility
-              }
-              size={20}
-              color={COLORS.textSecondary}
+      <FadeIn duration={500} delay={100}>
+        <View style={styles.header}>
+          {/* <View style={styles.iconBox}> */}
+            <Image
+              source={require("../../assets/PassSaver_logo.jpeg")}
+              style={styles.logo}
+              resizeMode="contain"
             />
-          </TouchableOpacity>
+          {/* </View> */}
+          {/* <Text style={styles.title}>PassSaver</Text> */}
+          <Text style={styles.subtitle}>
+            Enter your master password to unlock
+          </Text>
         </View>
+      </FadeIn>
 
-        <TouchableOpacity
-          style={[styles.btn, loading && styles.btnDisabled]}
-          onPress={handleUnlock}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator size="small" color={COLORS.background} />
-          ) : (
-            <Text style={styles.btnText}>Unlock Vault</Text>
-          )}
-        </TouchableOpacity>
-
-        {bioEnabled && (
-          <TouchableOpacity
-            style={[styles.bioBtn, (loading || bioLoading) && styles.btnDisabled]}
-            onPress={triggerBiometric}
-            disabled={loading || bioLoading}
-          >
-            <Icon
-              name={ACTION_ICONS.biometric}
-              size={20}
-              color={COLORS.accent}
+      <FadeIn duration={500} delay={200}>
+        <View style={styles.form}>
+          <View style={styles.inputWrapper}>
+            <TextInput
+              ref={passwordInputRef}
+              style={styles.input}
+              placeholder="Master Password"
+              placeholderTextColor={COLORS.textSecondary}
+              secureTextEntry={!showPass}
+              value={password}
+              onChangeText={setPassword}
+              onSubmitEditing={handleUnlock}
             />
-            {bioLoading ? (
-              <ActivityIndicator
-                size="small"
-                color={COLORS.accent}
-                style={{ marginLeft: SPACING.sm }}
+            <TouchableOpacity
+              onPress={() => setShowPass(!showPass)}
+              style={styles.eyeBtn}
+            >
+              <Icon
+                name={
+                  showPass
+                    ? ACTION_ICONS.visibilityOff
+                    : ACTION_ICONS.visibility
+                }
+                size={20}
+                color={COLORS.textSecondary}
               />
+            </TouchableOpacity>
+          </View>
+
+          <AnimatedButton
+            style={[styles.btn, loading && styles.btnDisabled]}
+            onPress={handleUnlock}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator size="small" color={COLORS.background} />
             ) : (
-              <Text style={styles.bioBtnText}>Use Biometrics Instead</Text>
+              <Text style={styles.btnText}>Unlock Vault</Text>
             )}
-          </TouchableOpacity>
-        )}
-      </View>
+          </AnimatedButton>
+
+          {bioEnabled && (
+            <AnimatedButton
+              style={[
+                styles.bioBtn,
+                (loading || bioLoading) && styles.btnDisabled,
+              ]}
+              onPress={triggerBiometric}
+              disabled={loading || bioLoading}
+            >
+              <Icon
+                name={ACTION_ICONS.biometric}
+                size={20}
+                color={COLORS.accent}
+              />
+              {bioLoading ? (
+                <ActivityIndicator
+                  size="small"
+                  color={COLORS.accent}
+                  style={{ marginLeft: SPACING.sm }}
+                />
+              ) : (
+                <Text style={styles.bioBtnText}>Use Biometrics Instead</Text>
+              )}
+            </AnimatedButton>
+          )}
+        </View>
+      </FadeIn>
 
       <View style={styles.glowCircle} />
     </KeyboardAvoidingView>
@@ -219,8 +322,8 @@ const styles = StyleSheet.create({
   },
   header: {
     alignItems: "center",
-    marginBottom: SPACING.xl,
-    gap: SPACING.sm,
+    marginBottom: SPACING.xl + SPACING.md,
+    gap: SPACING.md,
   },
   iconBox: {
     width: 80,
@@ -232,31 +335,40 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginBottom: SPACING.sm,
+    ...SHADOWS.md,
+  },
+  logo: {
+    width: 150,
+    height: 150,
+    borderRadius: 32,
   },
   icon: { fontSize: 40 },
   title: {
     fontSize: FONTS.sizes.xxl,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textPrimary,
+    letterSpacing: -0.5,
   },
   subtitle: {
-    fontSize: FONTS.sizes.sm,
+    fontSize: FONTS.sizes.md,
     color: COLORS.textSecondary,
     textAlign: "center",
+    marginTop: SPACING.xs,
   },
-  form: { gap: SPACING.md },
+  form: { gap: SPACING.lg },
   inputWrapper: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: COLORS.card,
     borderRadius: 14,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: COLORS.border,
     paddingHorizontal: SPACING.md,
+    ...SHADOWS.sm,
   },
   input: {
     flex: 1,
-    height: 52,
+    height: 56,
     color: COLORS.textPrimary,
     fontSize: FONTS.sizes.md,
   },
@@ -265,28 +377,34 @@ const styles = StyleSheet.create({
   btn: {
     backgroundColor: COLORS.accent,
     borderRadius: 14,
-    height: 54,
+    height: 56,
     alignItems: "center",
     justifyContent: "center",
+    ...SHADOWS.glow,
   },
   btnDisabled: { opacity: 0.6 },
   btnText: {
     color: COLORS.background,
     fontSize: FONTS.sizes.lg,
     fontWeight: FONTS.weights.bold,
+    letterSpacing: 0.3,
   },
   bioBtn: {
-    height: 52,
+    height: 56,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
     borderRadius: 14,
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    borderWidth: 2,
+    borderColor: COLORS.accent,
+    backgroundColor: COLORS.accentSoft,
+    ...SHADOWS.sm,
   },
   bioBtnText: {
-    color: COLORS.textSecondary,
+    color: COLORS.accent,
     fontSize: FONTS.sizes.md,
+    fontWeight: FONTS.weights.bold,
+    marginLeft: SPACING.sm,
   },
   glowCircle: {
     position: "absolute",

@@ -62,14 +62,22 @@ This project is currently suitable for personal testing and local device install
 ## Project Structure
 
 ```text
+docs/            # Project guides, task summaries, and testing checklists
+  android/       # Android-specific implementation guides
+  tasks/         # Summaries of completed development tasks
+  testing/       # Manual testing scenarios and checklists
 src/
-  components/      Reusable UI components
-  constants/       Theme and constants
-  context/         Session state and auto-lock behavior
-  navigation/      App navigator and route types
-  screens/         Splash, Setup, Lock, Home, Add/Edit, Settings
-  types/           Shared TypeScript types
-  utils/           Storage, biometrics, icons, password generation
+  components/    # Reusable UI components
+  constants/     # Theme and constants
+  context/       # Session state and auto-lock behavior
+  hooks/         # Custom React hooks
+  navigation/    # App navigator and route types
+  screens/       # Splash, Setup, Lock, Home, Add/Edit, Settings
+  types/         # Shared TypeScript types
+  utils/         # Storage, biometrics, icons, crypto
+__tests__/       # Automated test suite (Jest)
+App.tsx          # Application entry point
+TODO.md          # High-level roadmap
 ```
 
 ## Main Screens

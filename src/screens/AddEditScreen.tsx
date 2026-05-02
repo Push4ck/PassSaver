@@ -16,13 +16,14 @@ import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import Icon from "../components/Icon";
 import "react-native-get-random-values";
 import { v4 as uuidv4 } from "uuid";
-import { COLORS, FONTS, SPACING } from "../constants/theme";
+import { COLORS, FONTS, SPACING, SHADOWS } from "../constants/theme";
 import { RootStackParamList } from "../navigation/AppNavigator";
 import { useSession } from "../context/SessionContext";
 import { addEntry, updateEntry, loadVault } from "../utils/storage";
 import { PasswordEntry, Category } from "../types";
 import PasswordGeneratorModal from "../components/PasswordGeneratorModal";
 import { CATEGORY_ICONS, ACTION_ICONS } from "../utils/icons";
+import { AnimatedButton, FadeIn } from "../components/AnimatedComponents";
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 type RouteP = RouteProp<RootStackParamList, "AddEdit">;
@@ -84,7 +85,9 @@ export default function AddEditScreen() {
     try {
       // Duplicate password check
       const trimmedPassword = password.trim();
-      const unchanged = Boolean(existing && existing.password === trimmedPassword);
+      const unchanged = Boolean(
+        existing && existing.password === trimmedPassword,
+      );
       if (!unchanged) {
         const allEntries = await loadVault(masterPassword);
         const duplicate = allEntries.find(
@@ -101,7 +104,15 @@ export default function AddEditScreen() {
                 text: "Use Anyway",
                 onPress: async () => {
                   setLoading(true);
-                  await saveEntry();
+                  try {
+                    await saveEntry();
+                  } catch {
+                    setLoading(false);
+                    Alert.alert(
+                      "Save Failed",
+                      "Could not save entry. Please try again.",
+                    );
+                  }
                 },
               },
             ],
@@ -152,179 +163,179 @@ export default function AddEditScreen() {
         contentContainerStyle={styles.scroll}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            onPress={() => navigation.goBack()}
-            style={styles.backBtn}
-          >
-            <Icon
-              name={ACTION_ICONS.back}
-              size={24}
-              color={COLORS.textPrimary}
-            />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>
-            {existing ? "Edit Entry" : "New Entry"}
-          </Text>
-          <View style={{ width: 40 }} />
-        </View>
-
-        {/* Category Picker */}
-        <Text style={styles.label}>Category</Text>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.categoryRow}
-        >
-          {CATEGORIES.map((cat) => (
-            <TouchableOpacity
-              key={cat}
-              style={[
-                styles.categoryChip,
-                category === cat && styles.categoryChipActive,
-              ]}
-              onPress={() => setCategory(cat)}
+        <FadeIn duration={400} delay={50}>
+          {/* Header */}
+          <View style={styles.header}>
+            <AnimatedButton
+              onPress={() => navigation.goBack()}
+              style={styles.backBtn}
             >
               <Icon
-                name={CATEGORY_ICONS[cat]}
-                size={20}
-                color={COLORS.accent}
+                name={ACTION_ICONS.back}
+                size={24}
+                color={COLORS.textPrimary}
               />
-              <Text
-                style={[
-                  styles.categoryChipText,
-                  category === cat && styles.categoryChipTextActive,
-                ]}
-              >
-                {cat}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-
-        {/* Fields */}
-        <Text style={styles.label}>Title *</Text>
-        <View style={styles.inputWrapper}>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. Gmail, Netflix..."
-            placeholderTextColor={COLORS.textSecondary}
-            value={title}
-            onChangeText={setTitle}
-          />
-        </View>
-
-        <Text style={styles.label}>Username / Email</Text>
-        <View style={styles.inputWrapper}>
-          <TextInput
-            style={styles.input}
-            placeholder="your@email.com"
-            placeholderTextColor={COLORS.textSecondary}
-            value={username}
-            onChangeText={setUsername}
-            autoCapitalize="none"
-            keyboardType="email-address"
-          />
-        </View>
-
-        <Text style={styles.label}>Password *</Text>
-        <View style={styles.inputWrapper}>
-          <TextInput
-            style={styles.input}
-            placeholder="Enter password"
-            placeholderTextColor={COLORS.textSecondary}
-            secureTextEntry={!showPass}
-            value={password}
-            onChangeText={setPassword}
-          />
-          <TouchableOpacity
-            onPress={() => setShowPass(!showPass)}
-            style={styles.eyeBtn}
-          >
-            <Icon
-              name={
-                showPass ? ACTION_ICONS.visibilityOff : ACTION_ICONS.visibility
-              }
-              size={18}
-              color={COLORS.textPrimary}
-            />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.generatorBtn}
-            onPress={() => setShowGenerator(true)}
-          >
-            <Icon
-              name="dice-outline"
-              size={18}
-              color={COLORS.accent}
-            />
-          </TouchableOpacity>
-
-          <PasswordGeneratorModal
-            visible={showGenerator}
-            onClose={() => setShowGenerator(false)}
-            onUse={(pwd) => setPassword(pwd)}
-          />
-        </View>
-        {/* Strength Bar */}
-        {password.length > 0 && (
-          <View style={styles.strengthRow}>
-            {[1, 2, 3].map((i) => (
-              <View
-                key={i}
-                style={[
-                  styles.strengthBar,
-                  {
-                    backgroundColor:
-                      i <= strength.score ? strength.color : COLORS.border,
-                  },
-                ]}
-              />
-            ))}
-            <Text style={[styles.strengthLabel, { color: strength.color }]}>
-              {strength.label}
+            </AnimatedButton>
+            <Text style={styles.headerTitle}>
+              {existing ? "Edit Entry" : "New Entry"}
             </Text>
+            <View style={{ width: 40 }} />
           </View>
-        )}
 
-        <Text style={styles.label}>Notes</Text>
-        <View style={[styles.inputWrapper, styles.notesWrapper]}>
-          <TextInput
-            style={[styles.input, styles.notesInput]}
-            placeholder="Optional notes..."
-            placeholderTextColor={COLORS.textSecondary}
-            value={notes}
-            onChangeText={setNotes}
-            multiline
-            numberOfLines={3}
-          />
-        </View>
+          {/* Category Picker */}
+          <Text style={styles.label}>Category</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.categoryRow}
+          >
+            {CATEGORIES.map((cat) => (
+              <AnimatedButton
+                key={cat}
+                style={[
+                  styles.categoryChip,
+                  category === cat && styles.categoryChipActive,
+                ]}
+                onPress={() => setCategory(cat)}
+              >
+                <Icon
+                  name={CATEGORY_ICONS[cat]}
+                  size={20}
+                  color={COLORS.accent}
+                />
+                <Text
+                  style={[
+                    styles.categoryChipText,
+                    category === cat && styles.categoryChipTextActive,
+                  ]}
+                >
+                  {cat}
+                </Text>
+              </AnimatedButton>
+            ))}
+          </ScrollView>
 
-        {/* Save Button */}
-        <TouchableOpacity
-          style={[styles.saveBtn, loading && styles.saveBtnDisabled]}
-          onPress={handleSave}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator
-              size="small"
-              color={COLORS.background}
-              style={{ marginRight: 8 }}
+          {/* Fields */}
+          <Text style={styles.label}>Title *</Text>
+          <View style={styles.inputWrapper}>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Gmail, Netflix..."
+              placeholderTextColor={COLORS.textSecondary}
+              value={title}
+              onChangeText={setTitle}
             />
-          ) : (
-            <Icon
-              name={ACTION_ICONS.security}
-              size={20}
-              color={COLORS.background}
-              style={{ marginRight: 8 }}
+          </View>
+
+          <Text style={styles.label}>Username / Email</Text>
+          <View style={styles.inputWrapper}>
+            <TextInput
+              style={styles.input}
+              placeholder="your@email.com"
+              placeholderTextColor={COLORS.textSecondary}
+              value={username}
+              onChangeText={setUsername}
+              autoCapitalize="none"
+              keyboardType="email-address"
             />
+          </View>
+
+          <Text style={styles.label}>Password *</Text>
+          <View style={styles.inputWrapper}>
+            <TextInput
+              style={styles.input}
+              placeholder="Enter password"
+              placeholderTextColor={COLORS.textSecondary}
+              secureTextEntry={!showPass}
+              value={password}
+              onChangeText={setPassword}
+            />
+            <TouchableOpacity
+              onPress={() => setShowPass(!showPass)}
+              style={styles.eyeBtn}
+            >
+              <Icon
+                name={
+                  showPass
+                    ? ACTION_ICONS.visibilityOff
+                    : ACTION_ICONS.visibility
+                }
+                size={18}
+                color={COLORS.textPrimary}
+              />
+            </TouchableOpacity>
+            <AnimatedButton
+              style={styles.generatorBtn}
+              onPress={() => setShowGenerator(true)}
+            >
+              <Icon name="dice-outline" size={18} color={COLORS.accent} />
+            </AnimatedButton>
+
+            <PasswordGeneratorModal
+              visible={showGenerator}
+              onClose={() => setShowGenerator(false)}
+              onUse={(pwd) => setPassword(pwd)}
+            />
+          </View>
+          {/* Strength Bar */}
+          {password.length > 0 && (
+            <View style={styles.strengthRow}>
+              {[1, 2, 3].map((i) => (
+                <View
+                  key={i}
+                  style={[
+                    styles.strengthBar,
+                    {
+                      backgroundColor:
+                        i <= strength.score ? strength.color : COLORS.border,
+                    },
+                  ]}
+                />
+              ))}
+              <Text style={[styles.strengthLabel, { color: strength.color }]}>
+                {strength.label}
+              </Text>
+            </View>
           )}
-          <Text style={styles.saveBtnText}>
-            {loading ? "Saving..." : existing ? "Save Changes" : "Add Entry"}
-          </Text>
-        </TouchableOpacity>
+
+          <Text style={styles.label}>Notes</Text>
+          <View style={[styles.inputWrapper, styles.notesWrapper]}>
+            <TextInput
+              style={[styles.input, styles.notesInput]}
+              placeholder="Optional notes..."
+              placeholderTextColor={COLORS.textSecondary}
+              value={notes}
+              onChangeText={setNotes}
+              multiline
+              numberOfLines={3}
+            />
+          </View>
+
+          {/* Save Button */}
+          <AnimatedButton
+            style={[styles.saveBtn, loading && styles.saveBtnDisabled]}
+            onPress={handleSave}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator
+                size="small"
+                color={COLORS.background}
+                style={{ marginRight: 8 }}
+              />
+            ) : (
+              <Icon
+                name={ACTION_ICONS.security}
+                size={20}
+                color={COLORS.background}
+                style={{ marginRight: 8 }}
+              />
+            )}
+            <Text style={styles.saveBtnText}>
+              {loading ? "Saving..." : existing ? "Save Changes" : "Add Entry"}
+            </Text>
+          </AnimatedButton>
+        </FadeIn>
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -338,6 +349,7 @@ const styles = StyleSheet.create({
   scroll: {
     padding: SPACING.lg,
     paddingBottom: SPACING.xxl,
+    gap: SPACING.md,
   },
   header: {
     flexDirection: "row",
@@ -355,6 +367,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderWidth: 1,
     borderColor: COLORS.border,
+    ...SHADOWS.sm,
   },
   headerTitle: {
     fontSize: FONTS.sizes.lg,
@@ -362,13 +375,13 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
   },
   label: {
-    fontSize: FONTS.sizes.sm,
+    fontSize: FONTS.sizes.xs,
     fontWeight: FONTS.weights.bold,
     color: COLORS.textSecondary,
-    marginBottom: SPACING.xs,
-    marginTop: SPACING.md,
+    marginBottom: SPACING.sm,
+    marginTop: SPACING.lg,
     textTransform: "uppercase",
-    letterSpacing: 0.8,
+    letterSpacing: 1,
   },
   categoryRow: {
     marginBottom: SPACING.sm,
@@ -384,6 +397,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     marginRight: SPACING.sm,
+    ...SHADOWS.sm,
   },
   categoryChipActive: {
     backgroundColor: COLORS.accentSoft,
@@ -402,13 +416,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: COLORS.card,
     borderRadius: 14,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: COLORS.border,
     paddingHorizontal: SPACING.md,
+    ...SHADOWS.sm,
   },
   input: {
     flex: 1,
-    height: 52,
+    height: 56,
     color: COLORS.textPrimary,
     fontSize: FONTS.sizes.md,
   },
@@ -424,17 +439,19 @@ const styles = StyleSheet.create({
   saveBtn: {
     backgroundColor: COLORS.accent,
     borderRadius: 14,
-    height: 54,
+    height: 56,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
-    marginTop: SPACING.xl,
+    marginTop: SPACING.xl + SPACING.md,
+    ...SHADOWS.glow,
   },
   saveBtnDisabled: { opacity: 0.6 },
   saveBtnText: {
     color: COLORS.background,
     fontSize: FONTS.sizes.lg,
     fontWeight: FONTS.weights.bold,
+    letterSpacing: 0.3,
   },
   strengthRow: {
     flexDirection: "row",
@@ -463,5 +480,6 @@ const styles = StyleSheet.create({
     borderColor: COLORS.accent,
     backgroundColor: COLORS.accentSoft,
     marginTop: SPACING.xs,
+    ...SHADOWS.sm,
   },
 });
